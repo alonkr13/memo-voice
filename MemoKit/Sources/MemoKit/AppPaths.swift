@@ -12,10 +12,18 @@ public struct AppPaths: Sendable {
     public let container: URL
     public let usingAppGroup: Bool
 
-    public init(groupID: String = AppPaths.appGroupID) {
+    /// `groupContainer` resolves a group ID to its container (nil if the process is not
+    /// entitled to it). Injectable because the iOS Simulator hands out a container for any
+    /// group ID, whereas a real device returns nil for a group the app is not entitled to.
+    public init(
+        groupID: String = AppPaths.appGroupID,
+        groupContainer: (String) -> URL? = {
+            FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+        }
+    ) {
         self.groupID = groupID
         let fm = FileManager.default
-        if let group = fm.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
+        if let group = groupContainer(groupID) {
             container = group
             usingAppGroup = true
         } else {
