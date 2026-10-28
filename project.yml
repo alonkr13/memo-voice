@@ -1,0 +1,56 @@
+name: Memo
+options:
+  bundleIdPrefix: com.alonk
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+packages:
+  MemoKit:
+    path: MemoKit
+targets:
+  Memo:
+    type: application
+    platform: iOS
+    sources:
+      - Memo
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.alonk.memo
+        INFOPLIST_FILE: Memo/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Memo/Memo.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - package: MemoKit
+      - target: MemoWidget
+        embed: true
+  MemoWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - MemoWidget
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.alonk.memo.widget
+        INFOPLIST_FILE: MemoWidget/Info.plist
+        CODE_SIGN_ENTITLEMENTS: MemoWidget/MemoWidget.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: MemoKit
+schemes:
+  Memo:
+    build:
+      targets:
+        Memo: all
+    archive:
+      config: Release
