@@ -5,73 +5,102 @@ public actor MemoStore {
     private let file: URL
     private let audioDir: URL
     private var memos: [Memo]
-    /// Set when queue.json existed but could not be decoded; the unreadable file was moved here
-    /// (not overwritten) so the data can still be recovered. UI should warn about it.
+    /// Set when queue.json existed but was unreadable or had undecodable records; a copy of the
+    /// original file was saved here first. UI should warn about it.
     public private(set) var recoveredFromCorruptQueue: URL?
+    /// True when the queue file was damaged and could not be backed up; all writes throw.
+    public private(set) var writesBlocked = false
+
+    public enum StoreError: Error { case writesBlocked }
+
+    private struct Lossy: Decodable {
+        let memo: Memo?
+        init(from decoder: Decoder) throws {
+            memo = try? decoder.singleValueContainer().decode(Memo.self)
+        }
+    }
 
     /// - Parameters:
-    ///   - file: queue JSON file (a missing or corrupt file yields an empty queue).
+    ///   - file: queue JSON file (a missing file yields an empty queue).
     ///   - audioDir: directory that `Memo.audioFile` names are relative to.
-    public init(file: URL, audioDir: URL) {
+    /// `copyItem` is the seam used to back up a damaged queue file (injectable for tests).
+    public init(
+        file: URL, audioDir: URL,
+        copyItem: (URL, URL) throws -> Void = { try FileManager.default.copyItem(at: $0, to: $1) }
+    ) {
         self.file = file
         self.audioDir = audioDir
         try? FileManager.default.createDirectory(
             at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         memos = []
         guard FileManager.default.fileExists(atPath: file.path) else { return }
+
+        var damaged = false
         if let data = try? Data(contentsOf: file),
-           let decoded = try? JSONDecoder().decode([Memo].self, from: data) {
-            memos = decoded
+           let lossy = try? JSONDecoder().decode([Lossy].self, from: data) {
+            memos = lossy.compactMap(\.memo)
+            damaged = memos.count != lossy.count
         } else {
-            // Existing but unreadable: keep the bytes aside before any write can replace them.
-            let stamp = Int(Date().timeIntervalSince1970)
-            let backup = file.deletingLastPathComponent()
-                .appendingPathComponent("queue.corrupt-\(stamp)-\(UUID().uuidString.prefix(8)).json")
-            if (try? FileManager.default.moveItem(at: file, to: backup)) != nil {
-                recoveredFromCorruptQueue = backup
-            }
+            damaged = true
+        }
+        guard damaged else { return }
+
+        // Keep the original bytes aside before any write can replace them. If that is
+        // impossible, refuse to write at all rather than risk destroying the only copy.
+        let stamp = Int(Date().timeIntervalSince1970)
+        let backup = file.deletingLastPathComponent()
+            .appendingPathComponent("queue.corrupt-\(stamp)-\(UUID().uuidString.prefix(8)).json")
+        do {
+            try copyItem(file, backup)
+            recoveredFromCorruptQueue = backup
+        } catch {
+            writesBlocked = true
         }
     }
 
     public func all() -> [Memo] { memos }
 
     public func add(_ memo: Memo) throws {
-        memos.append(memo)
-        try persist()
+        try persist(memos + [memo])
     }
 
     public func update(_ id: UUID, _ change: (inout Memo) -> Void) throws {
         guard let index = memos.firstIndex(where: { $0.id == id }) else { return }
-        change(&memos[index])
-        try persist()
+        var updated = memos
+        change(&updated[index])
+        try persist(updated)
     }
 
     /// Call on launch: memos left mid-step by a kill/crash return to the previous retryable state.
     public func recoverInterrupted() throws {
         let fm = FileManager.default
-        for index in memos.indices {
-            switch memos[index].state {
+        var updated = memos
+        for index in updated.indices {
+            switch updated[index].state {
             case .transcribing:
-                memos[index].state = .recorded
+                updated[index].state = .recorded
             case .uploading:
-                memos[index].state = .transcribed
+                updated[index].state = .transcribed
             case .recording:
-                let path = audioDir.appendingPathComponent(memos[index].audioFile).path
+                let path = audioDir.appendingPathComponent(updated[index].audioFile).path
                 if fm.fileExists(atPath: path) {
-                    memos[index].state = .recorded
+                    updated[index].state = .recorded
                 } else {
-                    memos[index].state = .failed
-                    memos[index].lastError = "Recording was interrupted and no audio was saved."
+                    updated[index].state = .failed
+                    updated[index].lastError = "Recording was interrupted and no audio was saved."
                 }
             case .recorded, .transcribed, .done, .failed:
                 break
             }
         }
-        try persist()
+        try persist(updated)
     }
 
-    private func persist() throws {
-        let data = try JSONEncoder().encode(memos)
+    /// Writes `new` and only then adopts it as the in-memory state.
+    private func persist(_ new: [Memo]) throws {
+        if writesBlocked { throw StoreError.writesBlocked }
+        let data = try JSONEncoder().encode(new)
         try data.write(to: file, options: .atomic)
+        memos = new
     }
 }

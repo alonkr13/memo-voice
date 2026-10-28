@@ -100,6 +100,41 @@ import Testing
         await #expect(throws: (any Error).self) {
             try await store.add(Memo(audioFile: "a.m4a"))
         }
+        #expect(await store.all().isEmpty)
+    }
+
+    @Test func testPartiallyInvalidQueueKeepsGoodRecordsAndBacksUp() async throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("queue.json")
+        let good = Memo(recordedAt: Date(timeIntervalSince1970: 5), audioFile: "g.m4a", state: .recorded)
+        var array = try #require(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode([good])) as? [[String: Any]])
+        array.append(["id": UUID().uuidString, "recordedAt": 0, "audioFile": "b.m4a", "state": "bogus"])
+        array.append(["nonsense": true])
+        let original = try JSONSerialization.data(withJSONObject: array)
+        try original.write(to: file)
+
+        let store = MemoStore(file: file, audioDir: dir)
+        #expect(await store.all() == [good])
+        let backup = try #require(await store.recoveredFromCorruptQueue)
+        #expect(try Data(contentsOf: backup) == original)
+        try await store.add(Memo(audioFile: "n.m4a"))
+        #expect(try Data(contentsOf: backup) == original)
+    }
+
+    @Test func testWritesBlockedWhenBackupImpossible() async throws {
+        struct Boom: Error {}
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("queue.json")
+        let garbage = Data("garbage".utf8)
+        try garbage.write(to: file)
+
+        let store = MemoStore(file: file, audioDir: dir, copyItem: { _, _ in throw Boom() })
+        #expect(await store.writesBlocked)
+        await #expect(throws: MemoStore.StoreError.self) {
+            try await store.add(Memo(audioFile: "a.m4a"))
+        }
+        #expect(try Data(contentsOf: file) == garbage)
     }
 
     @Test func testSettingsDefaultsAndRoundTrip() throws {
