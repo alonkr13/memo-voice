@@ -1,0 +1,6 @@
+.superpowers/
+*.xcodeproj
+build/
+DerivedData/
+.build/
+Config.xcconfig
