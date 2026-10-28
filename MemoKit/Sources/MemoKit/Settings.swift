@@ -10,6 +10,21 @@ public struct AppSettings: Codable, Sendable, Equatable {
 
     public init() {}
 
+    private enum CodingKeys: String, CodingKey {
+        case driveFolderPath, modelId, language, uploadAudio, keepAudio
+    }
+
+    /// Tolerates missing keys so settings saved by older versions still load.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AppSettings()
+        driveFolderPath = try c.decodeIfPresent(String.self, forKey: .driveFolderPath) ?? d.driveFolderPath
+        modelId = try c.decodeIfPresent(String.self, forKey: .modelId) ?? d.modelId
+        language = try c.decodeIfPresent(String.self, forKey: .language) ?? d.language
+        uploadAudio = try c.decodeIfPresent(Bool.self, forKey: .uploadAudio) ?? d.uploadAudio
+        keepAudio = try c.decodeIfPresent(Bool.self, forKey: .keepAudio) ?? d.keepAudio
+    }
+
     public static var fileURL: URL { AppPaths.container.appendingPathComponent("settings.json") }
 
     /// Missing or corrupt file yields defaults.
