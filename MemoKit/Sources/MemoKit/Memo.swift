@@ -43,4 +43,20 @@ public struct Memo: Codable, Identifiable, Sendable, Equatable {
         self.lastError = lastError
         self.waitingReason = waitingReason
     }
+
+    /// Tolerant of missing optional fields (and durationSec) so schema additions don't break loading.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        recordedAt = try c.decode(Date.self, forKey: .recordedAt)
+        durationSec = try c.decodeIfPresent(Double.self, forKey: .durationSec) ?? 0
+        audioFile = try c.decode(String.self, forKey: .audioFile)
+        state = try c.decode(MemoState.self, forKey: .state)
+        transcript = try c.decodeIfPresent(String.self, forKey: .transcript)
+        language = try c.decodeIfPresent(String.self, forKey: .language)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        driveFileId = try c.decodeIfPresent(String.self, forKey: .driveFileId)
+        lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
+        waitingReason = try c.decodeIfPresent(String.self, forKey: .waitingReason)
+    }
 }

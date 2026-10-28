@@ -5,6 +5,9 @@ public actor MemoStore {
     private let file: URL
     private let audioDir: URL
     private var memos: [Memo]
+    /// Set when queue.json existed but could not be decoded; the unreadable file was moved here
+    /// (not overwritten) so the data can still be recovered. UI should warn about it.
+    public private(set) var recoveredFromCorruptQueue: URL?
 
     /// - Parameters:
     ///   - file: queue JSON file (a missing or corrupt file yields an empty queue).
@@ -12,29 +15,39 @@ public actor MemoStore {
     public init(file: URL, audioDir: URL) {
         self.file = file
         self.audioDir = audioDir
+        try? FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        memos = []
+        guard FileManager.default.fileExists(atPath: file.path) else { return }
         if let data = try? Data(contentsOf: file),
            let decoded = try? JSONDecoder().decode([Memo].self, from: data) {
             memos = decoded
         } else {
-            memos = []
+            // Existing but unreadable: keep the bytes aside before any write can replace them.
+            let stamp = Int(Date().timeIntervalSince1970)
+            let backup = file.deletingLastPathComponent()
+                .appendingPathComponent("queue.corrupt-\(stamp)-\(UUID().uuidString.prefix(8)).json")
+            if (try? FileManager.default.moveItem(at: file, to: backup)) != nil {
+                recoveredFromCorruptQueue = backup
+            }
         }
     }
 
     public func all() -> [Memo] { memos }
 
-    public func add(_ memo: Memo) {
+    public func add(_ memo: Memo) throws {
         memos.append(memo)
-        persist()
+        try persist()
     }
 
-    public func update(_ id: UUID, _ change: (inout Memo) -> Void) {
+    public func update(_ id: UUID, _ change: (inout Memo) -> Void) throws {
         guard let index = memos.firstIndex(where: { $0.id == id }) else { return }
         change(&memos[index])
-        persist()
+        try persist()
     }
 
     /// Call on launch: memos left mid-step by a kill/crash return to the previous retryable state.
-    public func recoverInterrupted() {
+    public func recoverInterrupted() throws {
         let fm = FileManager.default
         for index in memos.indices {
             switch memos[index].state {
@@ -54,11 +67,11 @@ public actor MemoStore {
                 break
             }
         }
-        persist()
+        try persist()
     }
 
-    private func persist() {
-        guard let data = try? JSONEncoder().encode(memos) else { return }
-        try? data.write(to: file, options: .atomic)
+    private func persist() throws {
+        let data = try JSONEncoder().encode(memos)
+        try data.write(to: file, options: .atomic)
     }
 }

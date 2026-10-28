@@ -17,7 +17,7 @@ import Testing
                         audioFile: "a.m4a", state: .recorded, transcript: "שלום")
 
         let first = MemoStore(file: file, audioDir: dir)
-        await first.add(memo)
+        try await first.add(memo)
 
         let second = MemoStore(file: file, audioDir: dir)
         #expect(await second.all() == [memo])
@@ -28,8 +28,8 @@ import Testing
         let file = dir.appendingPathComponent("queue.json")
         let memo = Memo(audioFile: "a.m4a", state: .recorded)
         let store = MemoStore(file: file, audioDir: dir)
-        await store.add(memo)
-        await store.update(memo.id) { $0.state = .transcribed; $0.transcript = "hi" }
+        try await store.add(memo)
+        try await store.update(memo.id) { $0.state = .transcribed; $0.transcript = "hi" }
 
         let reloaded = await MemoStore(file: file, audioDir: dir).all()
         #expect(reloaded.first?.state == .transcribed)
@@ -50,9 +50,9 @@ import Testing
 
         let store = MemoStore(file: file, audioDir: dir)
         for m in [transcribing, uploading, recordingWithAudio, recordingNoAudio, done] {
-            await store.add(m)
+            try await store.add(m)
         }
-        await store.recoverInterrupted()
+        try await store.recoverInterrupted()
 
         // Recovery must also be persisted.
         let byId = Dictionary(uniqueKeysWithValues:
@@ -63,6 +63,43 @@ import Testing
         #expect(byId[recordingNoAudio.id]?.state == .failed)
         #expect(byId[recordingNoAudio.id]?.lastError?.isEmpty == false)
         #expect(byId[done.id]?.state == .done)
+    }
+
+    @Test func testCorruptQueueIsBackedUpNotOverwritten() async throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("queue.json")
+        let garbage = Data("{{ not json".utf8)
+        try garbage.write(to: file)
+
+        let store = MemoStore(file: file, audioDir: dir)
+        #expect(await store.all().isEmpty)
+        let backup = try #require(await store.recoveredFromCorruptQueue)
+        let memo = Memo(audioFile: "a.m4a", state: .recorded)
+        try await store.add(memo)
+
+        #expect(try Data(contentsOf: backup) == garbage)
+        #expect(await MemoStore(file: file, audioDir: dir).all() == [memo])
+    }
+
+    @Test func testDecodesMemoWithMissingOptionalFields() async throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("queue.json")
+        let id = UUID()
+        let json = #"[{"id":"\#(id.uuidString)","recordedAt":0,"audioFile":"a.m4a","state":"recorded"}]"#
+        try Data(json.utf8).write(to: file)
+        let store = MemoStore(file: file, audioDir: dir)
+        #expect(await store.all().first?.id == id)
+        #expect(await store.recoveredFromCorruptQueue == nil)
+    }
+
+    @Test func testAddThrowsWhenFileNotWritable() async throws {
+        let dir = try tempDir()
+        let blocker = dir.appendingPathComponent("blocker")
+        try Data([0]).write(to: blocker)
+        let store = MemoStore(file: blocker.appendingPathComponent("queue.json"), audioDir: dir)
+        await #expect(throws: (any Error).self) {
+            try await store.add(Memo(audioFile: "a.m4a"))
+        }
     }
 
     @Test func testSettingsDefaultsAndRoundTrip() throws {
