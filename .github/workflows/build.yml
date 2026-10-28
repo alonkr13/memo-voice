@@ -60,7 +60,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/Memo.xcarchive \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            | tail -n 40
+            | tee archive.log | tail -n 40
 
       - name: Verify widget is embedded
         run: |
@@ -68,6 +68,21 @@ jobs:
           ls -R "$APP/PlugIns" | head -n 30
           test -d "$APP/PlugIns/MemoWidget.appex" || { echo "MemoWidget.appex missing"; exit 1; }
           echo "OK: Memo.app/PlugIns/MemoWidget.appex exists"
+
+      - name: Ad-hoc sign with entitlements
+        run: |
+          APP=build/Memo.xcarchive/Products/Applications/Memo.app
+          codesign -f -s - --entitlements MemoWidget/MemoWidget.entitlements "$APP/PlugIns/MemoWidget.appex"
+          codesign -f -s - --entitlements Memo/Memo.entitlements "$APP"
+
+      - name: Verify entitlements
+        run: |
+          APP=build/Memo.xcarchive/Products/Applications/Memo.app
+          for T in "$APP" "$APP/PlugIns/MemoWidget.appex"; do
+            echo "== $T"
+            codesign -d --entitlements :- "$T" | tee ent.txt
+            grep -q "group.com.alonk.memo" ent.txt || { echo "App Group entitlement missing in $T"; exit 1; }
+          done
 
       - name: Package IPA
         run: |
@@ -81,3 +96,12 @@ jobs:
           name: Memo-ipa
           path: build/Memo.ipa
           if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: |
+            test.log
+            archive.log
+          if-no-files-found: ignore
