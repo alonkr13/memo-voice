@@ -1,0 +1,83 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version --sdk iphoneos
+          ls /Applications | grep -i xcode || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Pick iPhone simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys, re
+          data = json.load(sys.stdin)["devices"]
+          best = None
+          for rt, devs in data.items():
+              m = re.search(r"iOS-(\d+)-(\d+)", rt)
+              if not m: continue
+              ver = (int(m.group(1)), int(m.group(2)))
+              if ver[0] < 26: continue
+              for d in devs:
+                  if d["name"].startswith("iPhone") and d.get("isAvailable", True):
+                      if best is None or ver > best[0]:
+                          best = (ver, d["udid"], d["name"])
+          if not best: sys.exit("no iOS 26+ iPhone simulator found")
+          print(best[1])
+          sys.stderr.write("Using %s %s\n" % (best[2], best[0]))
+          ')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Test MemoKit
+        working-directory: MemoKit
+        run: |
+          set -o pipefail
+          xcodebuild test -scheme MemoKit \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            CODE_SIGNING_ALLOWED=NO | tee ../test.log | tail -n 60
+
+      - name: Archive app
+        run: |
+          set -o pipefail
+          xcodebuild archive -project Memo.xcodeproj -scheme Memo \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Memo.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | tail -n 40
+
+      - name: Verify widget is embedded
+        run: |
+          APP=build/Memo.xcarchive/Products/Applications/Memo.app
+          ls -R "$APP/PlugIns" | head -n 30
+          test -d "$APP/PlugIns/MemoWidget.appex" || { echo "MemoWidget.appex missing"; exit 1; }
+          echo "OK: Memo.app/PlugIns/MemoWidget.appex exists"
+
+      - name: Package IPA
+        run: |
+          mkdir -p build/ipa/Payload
+          cp -R build/Memo.xcarchive/Products/Applications/Memo.app build/ipa/Payload/
+          (cd build/ipa && zip -qry ../Memo.ipa Payload)
+          ls -l build/Memo.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Memo-ipa
+          path: build/Memo.ipa
+          if-no-files-found: error
