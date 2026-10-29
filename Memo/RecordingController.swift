@@ -105,18 +105,25 @@ final class AppRecordingController: NSObject, RecordingControlling, AVAudioRecor
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         Task { @MainActor in
             do {
-                try await AppServices.store.update(id) { memo in
-                    memo.durationSec = duration
-                    if size > 0 {
-                        memo.state = .recorded
-                    } else {
-                        memo.state = .failed
-                        memo.lastError = "No audio was captured."
-                    }
-                }
+                try await Self.markStopped(AppServices.store, id: id, duration: duration, hasAudio: size > 0)
                 BackgroundTasks.submitContinued()
             } catch {
                 errorMessage = "Recording saved but the queue could not be updated: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Nonisolated so the `inout` closure isn't formed in a main-actor context (it isn't Sendable).
+    nonisolated private static func markStopped(
+        _ store: MemoStore, id: UUID, duration: Double, hasAudio: Bool
+    ) async throws {
+        try await store.update(id) { memo in
+            memo.durationSec = duration
+            if hasAudio {
+                memo.state = .recorded
+            } else {
+                memo.state = .failed
+                memo.lastError = "No audio was captured."
             }
         }
     }
