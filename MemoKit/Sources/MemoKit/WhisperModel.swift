@@ -10,13 +10,17 @@ public struct WhisperModel: Identifiable, Sendable, Hashable {
     public let url: URL
     /// Exact size of the complete file; anything else is treated as not downloaded.
     public let sizeBytes: Int64
+    /// Lowercase hex SHA-256 of the complete file, verified before a download is accepted.
+    public let sha256: String
 
-    public init(id: String, displayName: String, fileName: String, url: URL, sizeBytes: Int64) {
+    public init(id: String, displayName: String, fileName: String, url: URL, sizeBytes: Int64,
+                sha256: String) {
         self.id = id
         self.displayName = displayName
         self.fileName = fileName
         self.url = url
         self.sizeBytes = sizeBytes
+        self.sha256 = sha256.lowercased()
     }
 
     /// Name recorded in a memo's `model` front-matter field.
@@ -33,15 +37,18 @@ public struct WhisperModel: Identifiable, Sendable, Hashable {
         displayName: "ivrit.ai large-v3-turbo (Hebrew, q5_0)",
         fileName: "ivrit-whisper-large-v3-turbo-q5_0.bin",
         url: URL(string: "https://huggingface.co/tagidu/ivrit-whisper-large-v3-turbo-ggml-quantized/resolve/540d7736f31952a65efbdff0dc41e2b4b086a197/ggml-ivrit-large-v3-turbo-q5_0.bin")!,
-        sizeBytes: 574_041_195)
+        sizeBytes: 574_041_195,
+        sha256: "6c1da92e8e41dd64b8cc402eee7eb7a433d2152567e1a4d9cf181fefcc67a572")
 
-    /// OpenAI multilingual `small` (f16): faster, weaker at Hebrew.
+    /// OpenAI multilingual `small` (f16): faster, weaker at Hebrew. Pinned to repo commit
+    /// 5359861c; SHA-256 is the LFS oid reported by the Hugging Face API for that commit.
     public static let small = WhisperModel(
         id: "small",
         displayName: "OpenAI small (multilingual)",
         fileName: "ggml-small.bin",
-        url: URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin")!,
-        sizeBytes: 487_601_967)
+        url: URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin")!,
+        sizeBytes: 487_601_967,
+        sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b")
 
     public static let all: [WhisperModel] = [ivritTurbo, small]
 

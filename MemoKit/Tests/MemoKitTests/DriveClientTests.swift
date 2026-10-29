@@ -215,6 +215,42 @@ private func query(_ req: URLRequest, _ name: String) -> String? {
         #expect(StubURLProtocol.requests.filter { $0.0.httpMethod == "POST" }.isEmpty)
     }
 
+    /// The .md and .m4a of one memo share a memoId; dedupe must tell them apart by file kind.
+    @Test func testConvenienceDedupeDistinguishesFileKinds() async throws {
+        let memoId = UUID()
+        StubURLProtocol.reset { req, _ in
+            if req.url!.path.hasPrefix("/upload") { return (200, #"{"id":"UP"}"#) }
+            let q = query(req, "q") ?? ""
+            if q.contains("appProperties") {
+                return q.contains("key='memoPart' and value='md'")
+                    ? (200, #"{"files":[{"id":"MD"}]}"#) : (200, #"{"files":[]}"#)
+            }
+            return (200, #"{"files":[{"id":"FOLDER"}]}"#)
+        }
+        let client = makeClient()
+        let md = try await client.upload(
+            name: "a.md", data: Data("x".utf8), mimeType: "text/markdown", folderPath: "Memos", memoId: memoId)
+        #expect(md == "MD")
+        #expect(StubURLProtocol.requests.filter { $0.0.url!.path.hasPrefix("/upload") }.isEmpty)
+
+        let audio = try await client.upload(
+            name: "a.m4a", data: Data("y".utf8), mimeType: "audio/mp4", folderPath: "Memos", memoId: memoId)
+        #expect(audio == "UP")
+        let uploads = StubURLProtocol.requests.filter { $0.0.url!.path.hasPrefix("/upload") }
+        #expect(uploads.count == 1)
+        let body = String(decoding: uploads[0].1, as: UTF8.self)
+        #expect(body.contains(#""memoPart":"m4a""#))
+        #expect(body.contains(#""memoId":"\#(memoId.uuidString)""#))
+        let finds = StubURLProtocol.requests.compactMap { query($0.0, "q") }.filter { $0.contains("appProperties") }
+        #expect(finds.last?.contains("key='memoId' and value='\(memoId.uuidString)'") == true)
+        #expect(finds.last?.contains("key='memoPart' and value='m4a'") == true)
+    }
+
+    @Test func testDriveErrorsAreDescribed() {
+        #expect(DriveError.http(503, "x").localizedDescription.contains("503"))
+        #expect(DriveError.notSignedIn.localizedDescription == "Not signed in to Google")
+    }
+
     @Test func testTrashedCachedFolderIsReplaced() async throws {
         StubURLProtocol.reset { req, _ in
             let path = req.url!.path

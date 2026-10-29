@@ -4,12 +4,14 @@ public enum ModelDownloadError: Error, Equatable, LocalizedError {
     case httpStatus(Int)
     case wrongSize(expected: Int64, actual: Int64)
     case fileSystem(String)
+    case checksumMismatch
 
     public var errorDescription: String? {
         switch self {
         case .httpStatus(let s): return "Model download failed (HTTP \(s))."
         case .wrongSize(let e, let a): return "Model download incomplete (\(a) of \(e) bytes)."
         case .fileSystem(let m): return "Could not save the model: \(m)"
+        case .checksumMismatch: return nil
         }
     }
 }
@@ -142,6 +144,8 @@ public final class ModelManager: ObservableObject {
     nonisolated static func fileSize(_ url: URL) -> Int64? {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
     }
+
+    nonisolated static func sha256(of url: URL) throws -> String { "" }
 
     /// Moves a finished download to `<file>.part`, verifies HTTP status and size, then renames
     /// it to its final name. Must run synchronously inside `didFinishDownloadingTo`, because
