@@ -20,6 +20,22 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Write Config.xcconfig
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+        run: |
+          if [ -n "$GOOGLE_CLIENT_ID" ]; then
+            PREFIX="${GOOGLE_CLIENT_ID%.apps.googleusercontent.com}"
+            {
+              echo "GOOGLE_CLIENT_ID = ${PREFIX}.apps.googleusercontent.com"
+              echo "GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.${PREFIX}"
+            } > Config.xcconfig
+            echo "Config.xcconfig written from GOOGLE_CLIENT_ID secret"
+          else
+            cp Config.example.xcconfig Config.xcconfig
+            echo "GOOGLE_CLIENT_ID secret empty: using Config.example.xcconfig placeholders"
+          fi
+
       - name: Generate Xcode project
         run: xcodegen generate
 

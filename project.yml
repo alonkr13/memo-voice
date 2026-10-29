@@ -15,6 +15,9 @@ targets:
   Memo:
     type: application
     platform: iOS
+    configFiles:
+      Debug: Config.xcconfig
+      Release: Config.xcconfig
     sources:
       - Memo
       - Shared

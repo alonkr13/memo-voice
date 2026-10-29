@@ -29,6 +29,7 @@ struct MemoApp: App {
                 .navigationTitle("Memo")
             }
             .task { await ModelManager.shared.reconnect() }
+            .onOpenURL { GoogleAuth.handle($0) }
         }
     }
 }

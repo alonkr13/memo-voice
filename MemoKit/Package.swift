@@ -7,8 +7,14 @@ let package = Package(
     products: [
         .library(name: "MemoKit", targets: ["MemoKit"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/google/GoogleSignIn-iOS", exact: "9.0.0"),
+    ],
     targets: [
-        .target(name: "MemoKit", dependencies: ["whisper"]),
+        .target(name: "MemoKit", dependencies: [
+            "whisper",
+            .product(name: "GoogleSignIn", package: "GoogleSignIn-iOS"),
+        ]),
         // whisper.cpp v1.9.5 (commit d1be6fd): the release's XCFramework is attached to its
         // nightly build b5454. Dynamic framework, embedded into Memo.app/Frameworks by Xcode.
         .binaryTarget(
