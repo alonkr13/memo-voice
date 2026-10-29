@@ -1,3 +1,4 @@
+import MemoCore
 import Foundation
 
 /// A downloadable whisper.cpp ggml model.

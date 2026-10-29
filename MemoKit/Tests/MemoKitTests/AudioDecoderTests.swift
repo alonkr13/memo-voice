@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import Testing
 @testable import MemoKit
+@testable import MemoCore
 
 @Suite struct AudioDecoderTests {
     /// Writes a 2 s 44.1 kHz stereo 440 Hz sine-tone AAC .m4a into a fresh temp dir.

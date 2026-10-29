@@ -1,3 +1,4 @@
+import MemoCore
 import AVFoundation
 import Foundation
 

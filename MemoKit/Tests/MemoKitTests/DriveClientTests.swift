@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import MemoKit
+@testable import MemoCore
 
 private struct StubTokens: TokenProvider {
     func accessToken() async throws -> String { "tok" }

@@ -1,6 +1,6 @@
 import SwiftUI
 import WidgetKit
-import MemoKit
+import MemoCore
 
 struct PlaceholderEntry: TimelineEntry {
     let date: Date

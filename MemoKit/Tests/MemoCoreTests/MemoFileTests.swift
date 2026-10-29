@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import MemoKit
+@testable import MemoCore
 
 @Suite struct MemoFileTests {
     private let jerusalem = TimeZone(identifier: "Asia/Jerusalem")!

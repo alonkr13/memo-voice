@@ -1,3 +1,4 @@
+import MemoCore
 import Foundation
 
 /// The Drive operation the pipeline needs. `DriveClient`'s convenience upload already dedupes

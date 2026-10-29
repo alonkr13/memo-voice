@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import MemoKit
+@testable import MemoCore
 
 @Suite struct AppPathsTests {
     @Test func testFallsBackWhenGroupMissing() throws {

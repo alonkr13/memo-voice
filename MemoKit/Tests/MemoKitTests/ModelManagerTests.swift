@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import Testing
 @testable import MemoKit
+@testable import MemoCore
 
 @MainActor
 @Suite struct ModelManagerTests {

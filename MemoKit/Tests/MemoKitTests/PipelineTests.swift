@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import MemoKit
+@testable import MemoCore
 
 /// Fake Drive: records uploads and models the convenience upload's dedupe (a file already in
 /// Drive for the same memo and file kind is returned without a new upload).

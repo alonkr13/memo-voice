@@ -1,3 +1,4 @@
+import MemoCore
 import Foundation
 import whisper
 
