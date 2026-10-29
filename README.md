@@ -52,7 +52,7 @@ Memo uploads with the `drive.file` permission: the app can only see files and fo
 6. In GitHub, open the repo **Settings > Secrets and variables > Actions > New repository secret**.
    - Name: `GOOGLE_CLIENT_ID`
    - Secret: the Client ID from step 5.
-7. Open the **Actions** tab, pick the **build** workflow, click **Run workflow**, and wait for the green check mark. Download the new `Memo-ipa` artifact as in part 1.
+7. Open the **Actions** tab, pick the **build** workflow, click **Run workflow**, and wait for the green check mark. Download the new `Memo-ipa` artifact as in part 1. This new IPA, downloaded after the secret was added, is the one to install.
 
 The workflow reads the secret and writes `Config.xcconfig` (the client ID and its reversed form, used as the sign-in redirect) before building. Without the secret it builds with placeholders that cannot sign in.
 
@@ -87,7 +87,7 @@ The app stops opening after 7 days. Repeat the install steps with the same IPA (
    - **Google account:** tap **Sign in with Google** and use the account you added in part 2.
    - **Drive folder:** type a folder path, for example `Memos` or `Notes/Voice` (use `/` for subfolders). The app creates this folder in your Drive. Do not point it at a folder you made by hand: the app cannot see it, so it would create a new folder with the same name.
    - Tap **Test Drive connection**. It should report success.
-   - **Model:** choose **ivrit.ai large-v3-turbo (Hebrew, q5_0)** and tap **Download**. It is about 574 MB, so use Wi-Fi. The file is verified after download. The alternative, **OpenAI small (multilingual)**, is about 488 MB and weaker at Hebrew.
+   - **Model:** choose **ivrit.ai large-v3-turbo (Hebrew, q5_0)** and tap **Download**. It is shown in the app as 547 MB, so use Wi-Fi. The file is verified after download. The alternative, **OpenAI small (multilingual)**, is shown as 465 MB and weaker at Hebrew.
    - **Language:** Hebrew, English, or Auto. Hebrew is the default.
    - **Upload audio** (off by default) also puts the `.m4a` in Drive next to the `.md`. **Keep audio on phone** (off by default) keeps the local recording after upload. Audio is always kept until its transcript has been uploaded.
 
@@ -135,7 +135,7 @@ Notes for anything that reads these files:
 ## Troubleshooting
 
 - **Tapping the widget does nothing.** Use the **Record (opens app)** widget instead. Also check that **Settings > Memo > Live Activities** is on.
-- **Settings shows "App Group: no".** The app and widget are not sharing data, usually because extension or App Group handling was off in Sideloadly. Reinstall with those Advanced options enabled.
+- **The "App Group" row in Settings shows "no".** The app and widget are not sharing data, usually because extension or App Group handling was off in Sideloadly. Reinstall with those Advanced options enabled.
 - **A memo is stuck.** Open Memo, tap the memo, and tap **Retry**. Check your connection, that you are signed in, and that **Test Drive connection** works.
 - **Google sign-in expires about every week.** The consent screen is still in "Testing" mode. Publish it to production (part 2, step 4), then sign in again.
 - **Sign-in fails immediately.** The installed build was made before the `GOOGLE_CLIENT_ID` secret existed. Re-run the workflow and reinstall.
