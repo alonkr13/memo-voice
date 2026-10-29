@@ -8,6 +8,15 @@ struct MemoListView: View {
     @ObservedObject private var recorder = AppServices.recorder
     @State private var memos: [Memo] = []
     @State private var warning: String?
+    /// Persistent notices (until dismissed): see `LaunchNotices`.
+    @State private var notices: [Notice] = []
+
+    private struct Notice: Identifiable, Equatable {
+        enum Kind { case appGroupLost, corruptQueue, migration }
+        let kind: Kind
+        let text: String
+        var id: Kind { kind }
+    }
 
     var body: some View {
         List {
@@ -15,6 +24,15 @@ struct MemoListView: View {
                 Section {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
+                        .font(.callout)
+                }
+            }
+            ForEach(notices) { notice in
+                Section {
+                    Label(notice.text, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.callout)
+                    Button("Dismiss") { dismiss(notice.kind) }
                         .font(.callout)
                 }
             }
@@ -88,10 +106,37 @@ struct MemoListView: View {
         var text: String?
         if await store.writesBlocked {
             text = "The memo queue file is damaged and could not be backed up, so nothing can be saved. Recordings are not being queued."
-        } else if let backup = await store.recoveredFromCorruptQueue {
-            text = "Some saved memos could not be read. A copy of the original queue was kept as \(backup.lastPathComponent)."
         }
         if text != warning { warning = text }
+        let current = Self.loadNotices()
+        if current != notices { notices = current }
+    }
+
+    private static func loadNotices() -> [Notice] {
+        let stored = LaunchNotices()
+        var list: [Notice] = []
+        if stored.appGroupLost {
+            list.append(Notice(kind: .appGroupLost, text:
+                "Memo can't use its App Group container any more (it was probably reinstalled without App Group support). Memos recorded before may still be in that container, which this install can't open. Reinstall with App Groups enabled in Sideloadly to get them back."))
+        }
+        if let backup = stored.corruptQueueBackup {
+            list.append(Notice(kind: .corruptQueue, text:
+                "Some saved memos could not be read. A copy of the original queue was kept as \(backup)."))
+        }
+        if let problem = stored.migrationProblem {
+            list.append(Notice(kind: .migration, text: problem))
+        }
+        return list
+    }
+
+    private func dismiss(_ kind: Notice.Kind) {
+        let stored = LaunchNotices()
+        switch kind {
+        case .appGroupLost: stored.dismissAppGroupLost()
+        case .corruptQueue: stored.dismissCorruptQueueBackup()
+        case .migration: stored.dismissMigrationProblem()
+        }
+        notices = Self.loadNotices()
     }
 }
 

@@ -22,17 +22,23 @@ public struct AppPaths: Sendable {
         }
     ) {
         self.groupID = groupID
-        let fm = FileManager.default
         if let group = groupContainer(groupID) {
             container = group
             usingAppGroup = true
         } else {
-            let base = (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                    appropriateFor: nil, create: true))
-                ?? fm.temporaryDirectory
-            container = base
+            container = Self.fallbackContainer
             usingAppGroup = false
         }
+    }
+
+    /// The app's own Application Support directory: the container when the App Group is
+    /// unavailable. Data left there by such an install is moved into the group once it is back
+    /// (see `ContainerMigration`).
+    public static var fallbackContainer: URL {
+        let fm = FileManager.default
+        return (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                            appropriateFor: nil, create: true))
+            ?? fm.temporaryDirectory
     }
 
     /// Recorded audio. Created on access.

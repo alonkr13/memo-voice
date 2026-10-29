@@ -17,6 +17,8 @@ struct MemoApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        // First: nothing may read the container before data from an earlier install is moved.
+        AppServices.prepareContainer()
         BackgroundTasks.register()
         BackgroundTasks.startConnectivityMonitor()
     }
