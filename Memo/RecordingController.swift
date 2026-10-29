@@ -33,7 +33,7 @@ final class AppRecordingController: NSObject, RecordingControlling, AVAudioRecor
     private var interruptionObserver: NSObjectProtocol?
 
     func toggle() async {
-        if isRecording { finalize() } else { await start() }
+        if isRecording { finishRecording() } else { await start() }
     }
 
     private func start() async {
@@ -86,7 +86,7 @@ final class AppRecordingController: NSObject, RecordingControlling, AVAudioRecor
     }
 
     /// Idempotent: runs on Stop, on the recorder's own finish and on audio interruptions.
-    private func finalize() {
+    private func finishRecording() {
         guard let rec = recorder, let id = memoID, let url = fileURL else { return }
         recorder = nil
         memoID = nil
@@ -127,15 +127,15 @@ final class AppRecordingController: NSObject, RecordingControlling, AVAudioRecor
         ) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-            MainActor.assumeIsolated { self?.finalize() }
+            MainActor.assumeIsolated { self?.finishRecording() }
         }
     }
 
     nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        Task { @MainActor in self.finalize() }
+        Task { @MainActor in self.finishRecording() }
     }
 
     nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
-        Task { @MainActor in self.finalize() }
+        Task { @MainActor in self.finishRecording() }
     }
 }
