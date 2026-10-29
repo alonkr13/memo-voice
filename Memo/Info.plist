@@ -29,6 +29,11 @@
 			<key>CFBundleURLSchemes</key>
 			<array><string>$(GOOGLE_REVERSED_CLIENT_ID)</string></array>
 		</dict>
+		<dict>
+			<key>CFBundleURLName</key><string>com.alonk.memo</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>memo</string></array>
+		</dict>
 	</array>
 </dict>
 </plist>

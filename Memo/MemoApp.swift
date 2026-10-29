@@ -25,7 +25,14 @@ struct MemoApp: App {
         WindowGroup {
             NavigationStack { MemoListView() }
             .task { await ModelManager.shared.reconnect() }
-            .onOpenURL { GoogleAuth.handle($0) }
+            .task {
+                AppServices.recorder.cleanUpIfIdle()
+                await AppRecordingController.requestMicrophoneIfNeeded()
+            }
+            .onOpenURL { url in
+                // memo://record (widget deep-link fallback) starts recording right away.
+                if !AppServices.recorder.handle(url: url) { _ = GoogleAuth.handle(url) }
+            }
             .onChange(of: scenePhase, initial: true) { _, phase in
                 switch phase {
                 case .active: BackgroundTasks.processNow()
