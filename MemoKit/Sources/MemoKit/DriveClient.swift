@@ -73,7 +73,9 @@ public final class DriveClient: @unchecked Sendable {
 
     private func createFolder(name: String, parent: String) async throws -> String {
         struct Body: Encodable { let name: String; let mimeType: String; let parents: [String] }
-        let body = try JSONEncoder().encode(Body(name: name, mimeType: Self.folderMime, parents: [parent]))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        let body = try encoder.encode(Body(name: name, mimeType: Self.folderMime, parents: [parent]))
         var comps = URLComponents(string: Self.filesURL)!
         comps.queryItems = [URLQueryItem(name: "fields", value: "id")]
         var req = URLRequest(url: comps.url!)
