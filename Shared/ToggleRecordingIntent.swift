@@ -46,21 +46,38 @@ struct ToggleRecordingIntent: AudioRecordingIntent, LiveActivityIntent {
     func perform() async throws -> some IntentResult {
         #if WIDGET_EXTENSION
         // Not expected (this intent runs in the app process), but never fail silently.
-        let problem: String? = "Memo could not record from the widget. Open Memo and tap Record."
+        let failure: RecordingFailure? = RecordingFailure(
+            message: "Memo could not record from the widget. Open Memo and tap Record.",
+            liveActivityUnavailable: false)
         #else
-        let problem = await AppRecordingController.perform(action)
+        let failure = await AppRecordingController.perform(action)
         #endif
-        if let problem {
+        if let failure {
             // The error is also persisted and shown in the memo list. Open the app to show it
             // when the system allows that; otherwise report it to the system.
             if systemContext.currentMode.canContinueInForeground {
                 try await continueInForeground(alwaysConfirm: false)
+                #if !WIDGET_EXTENSION
+                // Only the Live Activity was missing: in the foreground the app can record
+                // without it, so start now (the spec's "opens the app and starts recording").
+                if failure.liveActivityUnavailable {
+                    await AppRecordingController.startInForeground()
+                }
+                #endif
             } else {
-                throw RecordingIntentError(message: problem)
+                throw RecordingIntentError(message: failure.message)
             }
         }
         return .result()
     }
+}
+
+/// Why a start from the intent failed.
+struct RecordingFailure: Sendable {
+    let message: String
+    /// True when the only problem was that the Live Activity could not start (turned off or
+    /// refused); recording itself would work in the foreground.
+    let liveActivityUnavailable: Bool
 }
 
 struct RecordingIntentError: Error, CustomLocalizedStringResourceConvertible {

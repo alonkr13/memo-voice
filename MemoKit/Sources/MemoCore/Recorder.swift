@@ -43,10 +43,16 @@ public extension Notification.Name {
 /// - an interruption (phone call, Siri, another app taking the audio session), an encoder
 ///   error or a media-services reset ends the recording and keeps what was captured.
 ///
+/// A recording that runs for `maxDuration` (30 minutes by default) is stopped through the normal
+/// stop path (persisted `recorded`, `.memoRecorded` posted), so a forgotten recording can't grow
+/// without bound or outlive what the pipeline can transcribe.
+///
 /// Microphone permission is the caller's job.
 @MainActor
 public final class Recorder: NSObject {
     nonisolated public static let memoIDKey = "memoID"
+    /// The default recording cap: 30 minutes.
+    nonisolated public static let defaultMaxDuration: TimeInterval = 30 * 60
 
     public private(set) var isRecording = false
     /// The memo being recorded or finalized right now (nil when idle). Processing and UI must
@@ -68,6 +74,10 @@ public final class Recorder: NSObject {
     private var recorder: AVAudioRecorder?
     private var fileURL: URL?
     private var observers: [NSObjectProtocol] = []
+    private let maxDuration: TimeInterval
+    private var autoStop: Task<Void, Never>?
+    /// Becomes `lastError` when the stop in progress finishes (set by the auto-stop).
+    private var stopNote: String?
 
     public static let settings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -76,10 +86,13 @@ public final class Recorder: NSObject {
         AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
     ]
 
-    public init(queue: any RecordingQueue, audioDir: URL, session: AVAudioSession = .sharedInstance()) {
+    /// - Parameter maxDuration: seconds after which a recording stops by itself.
+    public init(queue: any RecordingQueue, audioDir: URL, session: AVAudioSession = .sharedInstance(),
+                maxDuration: TimeInterval = Recorder.defaultMaxDuration) {
         self.queue = queue
         self.audioDir = audioDir
         self.session = session
+        self.maxDuration = maxDuration
     }
 
     /// Starts recording and returns the new memo's ID (`id`, so a caller can create the Live
@@ -88,6 +101,7 @@ public final class Recorder: NSObject {
     public func start(id: UUID = UUID()) async throws -> UUID {
         if let active = activeMemoID { return active }
         lastError = nil
+        stopNote = nil
 
         let now = Date()
         let url = audioDir.appendingPathComponent(
@@ -131,6 +145,7 @@ public final class Recorder: NSObject {
         startedAt = Date()
         isRecording = true
         observeSession()
+        scheduleAutoStop(for: memo.id)
         return memo.id
     }
 
@@ -141,6 +156,8 @@ public final class Recorder: NSObject {
         guard let rec = recorder, let id = activeMemoID, let url = fileURL else { return nil }
         recorder = nil
         fileURL = nil
+        autoStop?.cancel()
+        autoStop = nil
         removeObservers()
         let duration = startedAt.map { Date().timeIntervalSince($0) } ?? rec.currentTime
         rec.stop()
@@ -157,10 +174,26 @@ public final class Recorder: NSObject {
             // recovery turns it into `recorded` once nothing protects it.
             lastError = "Recording saved but the queue could not be updated: \(error.localizedDescription)"
         }
+        if lastError == nil, let note = stopNote { lastError = note }
+        stopNote = nil
         // Only now is it safe for recovery/processing to see this memo.
         activeMemoID = nil
         NotificationCenter.default.post(name: .memoRecorded, object: self, userInfo: [Self.memoIDKey: id])
         return memo
+    }
+
+    private func scheduleAutoStop(for id: UUID) {
+        autoStop?.cancel()
+        let limit = maxDuration
+        autoStop = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(limit))
+            guard !Task.isCancelled, let self, self.activeMemoID == id, self.isRecording else { return }
+            let minutes = Int((limit / 60).rounded())
+            // Becomes `lastError` before `.memoRecorded` is posted, so the app shows why the
+            // recording ended (the audio is saved and queued as usual).
+            self.stopNote = "Recording stopped automatically at the \(minutes)-minute limit. It was saved."
+            _ = await self.stop()
+        }
     }
 
     private func deactivateSession() {

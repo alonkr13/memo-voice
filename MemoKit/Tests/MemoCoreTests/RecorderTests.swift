@@ -113,6 +113,36 @@ private final class IDBox: @unchecked Sendable {
         #expect(await store.all().first?.state == .recorded)
     }
 
+    /// A recording that reaches the cap stops through the normal path: `recorded`, the
+    /// notification posted, the slot freed, and a note saying why.
+    @Test func testStopsAtMaxDuration() async throws {
+        let (dir, store) = try env()
+        let recorder = Recorder(queue: store, audioDir: dir, maxDuration: 1.0)
+        let notified = IDBox()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .memoRecorded, object: recorder, queue: .main
+        ) { note in
+            notified.set(note.userInfo?[Recorder.memoIDKey] as? UUID)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let id = try await recorder.start()
+        #expect(await waitFor { recorder.activeMemoID == nil })
+        #expect(!recorder.isRecording)
+        #expect(notified.get() == id)
+        let memo = try #require(await store.all().first)
+        #expect(memo.id == id)
+        #expect(memo.state == .recorded)
+        #expect(memo.durationSec >= 0.9)
+        #expect(recorder.lastError?.contains("limit") == true)
+        // The next recording starts clean and is not stopped by the old timer.
+        let next = try await recorder.start()
+        #expect(recorder.lastError == nil)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(recorder.activeMemoID == next)
+        _ = await recorder.stop()
+    }
+
     @Test func testStartWhileRecordingIsNoOp() async throws {
         let (dir, store) = try env()
         let recorder = Recorder(queue: store, audioDir: dir)
