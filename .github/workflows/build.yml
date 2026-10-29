@@ -2,14 +2,24 @@ name: build
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
+# A newer push to the same branch supersedes the older run.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    # A pull request from this repository is already built by its branch push: only build
+    # pull requests from forks, so the same commit isn't built twice.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      # Node 24 majors (v4 of checkout/upload-artifact ran on the deprecated Node 20).
+      - uses: actions/checkout@v7
 
       - name: Toolchain info
         run: |
@@ -133,13 +143,13 @@ jobs:
           (cd build/ipa && zip -qry ../Memo.ipa Payload)
           ls -l build/Memo.ipa
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Memo-ipa
           path: build/Memo.ipa
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: build-logs
