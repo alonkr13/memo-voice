@@ -48,7 +48,7 @@ private struct FakeTranscriber: Transcribing {
 private struct Boom: Error, LocalizedError { var errorDescription: String? { "boom" } }
 
 @Suite struct PipelineTests {
-    struct Env {
+    fileprivate struct Env {
         let dir: URL
         let store: MemoStore
         let drive: FakeDrive
