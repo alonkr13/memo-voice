@@ -33,6 +33,12 @@ struct MemoListView: View {
             }
             ForEach(memos) { memo in
                 NavigationLink(value: memo.id) { MemoRow(memo: memo) }
+                    .swipeActions(edge: .trailing) {
+                        if MemoActions.canRetry(memo, activeID: recorder.activeMemoID) {
+                            Button("Retry") { Task { await AppServices.pipeline.retry(memo.id) } }
+                                .tint(.orange)
+                        }
+                    }
             }
         }
         .navigationTitle("Memos")
@@ -66,6 +72,7 @@ struct MemoListView: View {
                 .frame(maxWidth: .infinity, minHeight: 56)
         }
         .buttonStyle(.borderedProminent)
+        .disabled(recorder.isStarting)
         .tint(recorder.isRecording ? .gray : .red)
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -121,8 +128,9 @@ private struct MemoRow: View {
     }
 
     private var firstLine: String? {
-        guard let text = memo.transcript?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty else { return nil }
+        guard let text = memo.transcript?.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return nil }
+        if text.isEmpty { return memo.state == .done ? MemoFile.noSpeechBody : nil }
         return text.split(whereSeparator: \.isNewline).first.map(String.init)
     }
 }

@@ -26,14 +26,24 @@ final class AppRecordingController: NSObject, RecordingControlling, AVAudioRecor
     @Published var errorMessage: String?
 
     private var recorder: AVAudioRecorder?
-    private var memoID: UUID?
+    /// The memo being recorded right now (nil when idle); the UI must not retry/delete it.
+    @Published private(set) var activeMemoID: UUID?
+    @Published private(set) var isStarting = false
+    private var memoID: UUID? {
+        get { activeMemoID }
+        set { activeMemoID = newValue }
+    }
     private var fileURL: URL?
     private var startedAt = Date()
     private var ticker: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
 
     func toggle() async {
-        if isRecording { finishRecording() } else { await start() }
+        if isRecording { finishRecording(); return }
+        guard !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
+        await start()
     }
 
     private func start() async {

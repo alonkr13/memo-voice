@@ -103,6 +103,7 @@ struct SettingsView: View {
         let final = normalized.isEmpty ? AppSettings.defaultFolderPath : normalized
         folderText = final
         if settings.driveFolderPath != final { settings.driveFolderPath = final }
+        settings.save()   // directly: .onChange may not fire as the view disappears
     }
 
     private func refreshAccount() {

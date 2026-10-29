@@ -5,6 +5,7 @@ import UIKit
 struct MemoDetailView: View {
     let memoID: UUID
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var recorder = AppServices.recorder
     @State private var memo: Memo?
     @State private var confirmDelete = false
     @State private var deleteError: String?
@@ -63,6 +64,7 @@ struct MemoDetailView: View {
                         }
                     }
                     Button("Delete", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                        .disabled(!canDelete(memo))
                 }
             }
         }
@@ -85,8 +87,13 @@ struct MemoDetailView: View {
         }
     }
 
+    /// Any unfinished memo that isn't being recorded right now (waiting, failed, stuck).
     private func canRetry(_ memo: Memo) -> Bool {
-        memo.state == .failed || memo.state == .transcribed || memo.lastError != nil
+        MemoActions.canRetry(memo, activeID: recorder.activeMemoID)
+    }
+
+    private func canDelete(_ memo: Memo) -> Bool {
+        memo.id != recorder.activeMemoID && memo.state != .transcribing && memo.state != .uploading
     }
 
     private func delete() async {

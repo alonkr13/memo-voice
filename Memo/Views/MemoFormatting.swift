@@ -37,3 +37,10 @@ enum MemoFormat {
         }
     }
 }
+
+enum MemoActions {
+    /// Retry is offered for every unfinished memo except the one being recorded right now.
+    static func canRetry(_ memo: Memo, activeID: UUID?) -> Bool {
+        memo.state != .done && memo.id != activeID
+    }
+}
