@@ -37,3 +37,33 @@ public enum WidgetState {
         defaults?.set(value, forKey: isRecordingKey)
     }
 }
+
+/// The last recording problem, kept across launches: a widget tap that fails has no UI, so the
+/// app shows it in the memo list the next time it opens, until dismissed. Written to the app's
+/// own defaults and, when the App Group is available, to the shared defaults too.
+public enum RecordingErrorLog {
+    public static let key = "lastRecordingError"
+
+    public static var defaultStores: [UserDefaults] {
+        [UserDefaults.standard] + (WidgetState.defaults.map { [$0] } ?? [])
+    }
+
+    /// The first store that has a message.
+    public static func load(from stores: [UserDefaults]? = nil) -> String? {
+        for store in stores ?? defaultStores {
+            if let message = store.string(forKey: key), !message.isEmpty { return message }
+        }
+        return nil
+    }
+
+    /// nil (or empty) clears it in every store.
+    public static func save(_ message: String?, to stores: [UserDefaults]? = nil) {
+        for store in stores ?? defaultStores {
+            if let message, !message.isEmpty {
+                store.set(message, forKey: key)
+            } else {
+                store.removeObject(forKey: key)
+            }
+        }
+    }
+}

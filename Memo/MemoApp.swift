@@ -26,7 +26,7 @@ struct MemoApp: App {
             NavigationStack { MemoListView() }
             .task { await ModelManager.shared.reconnect() }
             .task {
-                AppServices.recorder.cleanUpIfIdle()
+                await AppServices.recorder.cleanUpIfIdle()
                 await AppRecordingController.requestMicrophoneIfNeeded()
             }
             .onOpenURL { url in

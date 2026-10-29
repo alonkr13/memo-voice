@@ -131,6 +131,17 @@ private final class IDBox: @unchecked Sendable {
         #expect(await store.all().count == 1)
     }
 
+    @Test func testStartUsesGivenID() async throws {
+        // The app creates the Live Activity for this ID before recording starts.
+        let (dir, store) = try env()
+        let recorder = Recorder(queue: store, audioDir: dir)
+        let wanted = UUID()
+        let id = try await recorder.start(id: wanted)
+        #expect(id == wanted)
+        #expect(await store.all().first?.id == wanted)
+        #expect(await recorder.stop()?.id == wanted)
+    }
+
     @Test func testActiveIDSetBeforeMemoAdded() async throws {
         let (dir, store) = try env()
         let spy = SpyQueue(store: store)

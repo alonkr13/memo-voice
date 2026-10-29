@@ -23,6 +23,8 @@ struct MemoListView: View {
                     Label(message, systemImage: "mic.slash.fill")
                         .foregroundStyle(.red)
                         .font(.callout)
+                    Button("Dismiss") { recorder.errorMessage = nil }
+                        .font(.callout)
                 }
             }
             if memos.isEmpty {

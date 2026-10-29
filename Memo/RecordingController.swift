@@ -12,8 +12,8 @@ protocol RecordingControlling: ObservableObject {
     var isStarting: Bool { get }
     /// Seconds recorded so far; 0 when idle.
     var elapsed: TimeInterval { get }
-    /// Last start/stop problem, shown to the user.
-    var errorMessage: String? { get }
+    /// Last start/stop problem, shown to the user until dismissed.
+    var errorMessage: String? { get set }
     /// The memo being recorded or finalized (nil when idle); the UI must not retry/delete it.
     var activeMemoID: UUID? { get }
     /// Starts a recording, or stops the current one and queues it for processing.
@@ -30,7 +30,12 @@ final class AppRecordingController: RecordingControlling {
     @Published private(set) var isRecording = false
     @Published private(set) var isStarting = false
     @Published private(set) var elapsed: TimeInterval = 0
-    @Published var errorMessage: String?
+    /// Last start/stop problem. Persisted (app-local defaults, plus the App Group when
+    /// available) so a failure from a widget tap, which happens with no UI, is still shown in
+    /// the memo list the next time the app opens, until dismissed.
+    @Published var errorMessage: String? {
+        didSet { RecordingErrorLog.save(errorMessage) }
+    }
 
     var activeMemoID: UUID? { core.activeMemoID }
 
@@ -39,9 +44,14 @@ final class AppRecordingController: RecordingControlling {
     /// A Stop that arrived while a start was still in progress; honoured once it finishes.
     private var stopRequested = false
     private var endObserver: NSObjectProtocol?
+    /// Ending the Live Activity after a recording ended; `stop()` awaits it.
+    private var endingActivities: Task<Void, Never>?
+    /// The current recording's Live Activity.
+    private var activityID: String?
 
     init(core: Recorder) {
         self.core = core
+        errorMessage = RecordingErrorLog.load()
         endObserver = NotificationCenter.default.addObserver(
             forName: .memoRecorded, object: core, queue: nil
         ) { [weak self] _ in
@@ -56,18 +66,25 @@ final class AppRecordingController: RecordingControlling {
         if core.isRecording { await stop() } else { await start() }
     }
 
-    /// Called by `ToggleRecordingIntent.perform()` in the app process.
-    static func perform(_ action: RecordingAction) async {
+    /// Called by `ToggleRecordingIntent.perform()` in the app process (no UI). Returns the
+    /// problem when a start failed, so the intent can surface it.
+    static func perform(_ action: RecordingAction) async -> String? {
         let controller = AppServices.recorder
         switch action {
-        case .toggle: await controller.toggle()
-        case .start: await controller.start()
-        case .stop: await controller.stop()
+        case .toggle:
+            if controller.core.isRecording { await controller.stop(); return nil }
+            return await controller.start(requireLiveActivity: true)
+        case .start:
+            return await controller.start(requireLiveActivity: true)
+        case .stop:
+            await controller.stop()
+            return nil
         }
     }
 
-    /// `memo://record` starts, `memo://stop` stops, `memo://toggle` toggles. Returns false for
-    /// other URLs.
+    /// `memo://record` starts, `memo://stop` stops, `memo://toggle` toggles; any other
+    /// `memo://` URL (e.g. `memo://open`, used after a failed widget start) just opens the app.
+    /// Returns false for non-`memo` URLs.
     func handle(url: URL) -> Bool {
         guard url.scheme?.lowercased() == "memo" else { return false }
         switch url.host?.lowercased() {
@@ -79,37 +96,68 @@ final class AppRecordingController: RecordingControlling {
         return true
     }
 
-    func start() async {
+    /// Starts a recording. Returns the problem if it didn't start (also kept in `errorMessage`).
+    /// - Parameter requireLiveActivity: true for the widget / Live Activity path (app in the
+    ///   background), where `AudioRecordingIntent` needs the Live Activity and iOS would stop
+    ///   the recording without it. In the app (foreground) a missing activity is a warning.
+    @discardableResult
+    func start(requireLiveActivity: Bool = false) async -> String? {
         // One recording at a time; a second start (double tap, widget + app) is a no-op.
-        guard !isStarting, core.activeMemoID == nil else { return }
+        guard !isStarting, core.activeMemoID == nil else { return nil }
         isStarting = true
         stopRequested = false
-        await beginRecording()
+        // Stale state after a kill (old Live Activity, widget still saying "recording") must
+        // not need a second tap or leave two activities.
+        await resetStaleState()
+        let problem = await beginRecording(requireLiveActivity: requireLiveActivity)
         isStarting = false
         if stopRequested {
             stopRequested = false
             await stop()
         }
+        return problem
     }
 
-    private func beginRecording() async {
+    private func beginRecording(requireLiveActivity: Bool) async -> String? {
         errorMessage = nil
         guard await Self.microphoneAllowed() else {
-            errorMessage = "Microphone permission denied. Enable it in Settings > Memo."
-            return
+            return fail("Microphone permission denied. Enable it in Settings > Memo.")
         }
-        let id: UUID
+
+        // The Live Activity first ("you must start a Live Activity when you begin the audio
+        // recording"), for the memo ID the recorder will use.
+        let memoID = UUID()
+        var warning: String?
+        var newActivity: String?
+        switch Self.requestLiveActivity(memoID: memoID, startedAt: Date()) {
+        case .success(let id):
+            newActivity = id
+        case .failure(let problem):
+            if requireLiveActivity { return fail(problem.message + " Recording did not start.") }
+            warning = problem.message + " Recording anyway."
+        }
+
         do {
-            id = try await core.start()
+            _ = try await core.start(id: memoID)
         } catch {
-            errorMessage = "Could not start recording: \(error.localizedDescription)"
-            return
+            if let newActivity { await Self.endActivities([newActivity]) }
+            return fail("Could not start recording: \(error.localizedDescription)")
         }
+        activityID = newActivity
         isRecording = true
         startTicker()
-        startLiveActivity(memoID: id, startedAt: core.startedAt ?? Date())
         WidgetState.setRecording(true)
         WidgetCenter.shared.reloadAllTimelines()
+        if let warning { errorMessage = warning }
+        if let newActivity, let started = core.startedAt {
+            await Self.updateActivity(newActivity, startedAt: started)
+        }
+        return nil
+    }
+
+    private func fail(_ message: String) -> String {
+        errorMessage = message
+        return message
     }
 
     func stop() async {
@@ -117,18 +165,25 @@ final class AppRecordingController: RecordingControlling {
         if core.isRecording {
             // Persists `recorded`, then posts .memoRecorded (-> recordingEnded) before returning.
             await core.stop()
+            await endingActivities?.value
         } else if core.activeMemoID == nil {
             // Nothing recording: a stale Live Activity / widget state (e.g. the app was killed
             // mid-recording). Clean up so they stop claiming a recording.
-            cleanUpIfIdle()
+            await resetStaleState()
         }
     }
 
     /// Call on launch: ends Live Activities and resets widget state left over from a process
     /// that died while recording.
-    func cleanUpIfIdle() {
+    func cleanUpIfIdle() async {
         guard !isStarting, core.activeMemoID == nil else { return }
-        endLiveActivities()
+        await resetStaleState()
+    }
+
+    /// Only while nothing is recording.
+    private func resetStaleState() async {
+        let stale = Set(Activity<RecordingActivity>.activities.map(\.id))
+        if !stale.isEmpty { await Self.endActivities(stale) }
         if WidgetState.isRecording != false {
             WidgetState.setRecording(false)
             WidgetCenter.shared.reloadAllTimelines()
@@ -144,7 +199,11 @@ final class AppRecordingController: RecordingControlling {
         elapsed = 0
         if let problem = core.lastError { errorMessage = problem }
         objectWillChange.send()   // activeMemoID (computed from core) changed too
-        endLiveActivities()
+        // Snapshot now, so an activity for a recording started right after is never ended.
+        var ids = Set(Activity<RecordingActivity>.activities.map(\.id))
+        if let activityID { ids.insert(activityID) }
+        activityID = nil
+        endingActivities = Task { await Self.endActivities(ids) }
         WidgetState.setRecording(false)
         WidgetCenter.shared.reloadAllTimelines()
         BackgroundTasks.submitContinued()
@@ -180,32 +239,37 @@ final class AppRecordingController: RecordingControlling {
         }
     }
 
+    struct ActivityProblem: Error { let message: String }
+
     /// `AudioRecordingIntent` requires a Live Activity for as long as the recording runs. It is
-    /// also the lock-screen indicator with the Stop button. Failure doesn't stop the recording.
-    private func startLiveActivity(memoID: UUID, startedAt: Date) {
+    /// also the lock-screen indicator with the Stop button. Returns the activity's ID.
+    private static func requestLiveActivity(memoID: UUID, startedAt: Date) -> Result<String, ActivityProblem> {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            errorMessage = "Live Activities are turned off for Memo, so there is no lock-screen Stop button (and iOS may stop widget recordings). Turn them on in Settings > Memo."
-            return
+            return .failure(ActivityProblem(message:
+                "Live Activities are turned off for Memo. Turn them on in Settings > Memo > Live Activities so the widget can record."))
         }
         do {
-            _ = try Activity<RecordingActivity>.request(
+            let activity = try Activity<RecordingActivity>.request(
                 attributes: RecordingActivity(memoID: memoID),
                 content: ActivityContent(state: .init(startedAt: startedAt), staleDate: nil),
                 pushType: nil)
+            return .success(activity.id)
         } catch {
-            errorMessage = "Recording, but the Live Activity could not start: \(error.localizedDescription)"
+            return .failure(ActivityProblem(message:
+                "The Live Activity could not start (\(error.localizedDescription))."))
         }
     }
 
-    private func endLiveActivities() {
-        // Snapshot the IDs now, so an activity for a recording started right after this call
-        // is never ended by it.
-        let ids = Set(Activity<RecordingActivity>.activities.map(\.id))
-        guard !ids.isEmpty else { return }
-        Task.detached {
-            for activity in Activity<RecordingActivity>.activities where ids.contains(activity.id) {
-                await activity.end(nil, dismissalPolicy: .immediate)
-            }
+    /// Nonisolated and looked up by ID, so no `Activity` value crosses actors.
+    nonisolated private static func endActivities(_ ids: Set<String>) async {
+        for activity in Activity<RecordingActivity>.activities where ids.contains(activity.id) {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+    }
+
+    nonisolated private static func updateActivity(_ id: String, startedAt: Date) async {
+        for activity in Activity<RecordingActivity>.activities where activity.id == id {
+            await activity.update(ActivityContent(state: .init(startedAt: startedAt), staleDate: nil))
         }
     }
 }

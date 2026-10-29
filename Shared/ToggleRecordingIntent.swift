@@ -8,8 +8,8 @@
 // (WidgetKit "Adding interactivity to widgets and Live Activities"; AppIntents
 // "LiveActivityIntent"). `AudioRecordingIntent` requires starting a Live Activity when the
 // recording begins, which only the app process can do (ActivityKit). The widget build
-// (WIDGET_EXTENSION, set in project.yml) compiles a no-op `perform()` and never links the
-// recorder, store or audio session code.
+// (WIDGET_EXTENSION, set in project.yml) compiles a `perform()` that never links the
+// recorder, store or audio session code; it reports an error instead of failing silently.
 import AppIntents
 import Foundation
 
@@ -30,8 +30,9 @@ struct ToggleRecordingIntent: AudioRecordingIntent, LiveActivityIntent {
     static var description: IntentDescription {
         IntentDescription("Starts recording a voice memo, or stops the one being recorded.")
     }
-    /// Record without bringing the app to the foreground (the whole point of the widget).
-    static var supportedModes: IntentModes { .background }
+    /// Runs in the background (record without opening the app: the whole point of the
+    /// widget), and may move to the foreground only to show a failed start.
+    static var supportedModes: IntentModes { [.background, .foreground(.dynamic)] }
 
     @Parameter(title: "Action", default: .toggle)
     var action: RecordingAction
@@ -43,9 +44,26 @@ struct ToggleRecordingIntent: AudioRecordingIntent, LiveActivityIntent {
     }
 
     func perform() async throws -> some IntentResult {
-        #if !WIDGET_EXTENSION
-        await AppRecordingController.perform(action)
+        #if WIDGET_EXTENSION
+        // Not expected (this intent runs in the app process), but never fail silently.
+        let problem: String? = "Memo could not record from the widget. Open Memo and tap Record."
+        #else
+        let problem = await AppRecordingController.perform(action)
         #endif
+        if let problem {
+            // The error is also persisted and shown in the memo list. Open the app to show it
+            // when the system allows that; otherwise report it to the system.
+            if systemContext.currentMode.canContinueInForeground {
+                try await continueInForeground(alwaysConfirm: false)
+            } else {
+                throw RecordingIntentError(message: problem)
+            }
+        }
         return .result()
     }
+}
+
+struct RecordingIntentError: Error, CustomLocalizedStringResourceConvertible {
+    let message: String
+    var localizedStringResource: LocalizedStringResource { LocalizedStringResource(stringLiteral: message) }
 }

@@ -82,16 +82,17 @@ public final class Recorder: NSObject {
         self.session = session
     }
 
-    /// Starts recording and returns the new memo's ID. If a recording is already running (or
-    /// starting, or finalizing), does nothing and returns that memo's ID.
-    public func start() async throws -> UUID {
+    /// Starts recording and returns the new memo's ID (`id`, so a caller can create the Live
+    /// Activity for it first). If a recording is already running (or starting, or finalizing),
+    /// does nothing and returns that memo's ID.
+    public func start(id: UUID = UUID()) async throws -> UUID {
         if let active = activeMemoID { return active }
         lastError = nil
 
         let now = Date()
         let url = audioDir.appendingPathComponent(
             "memo-\(Int(now.timeIntervalSince1970))-\(UUID().uuidString.prefix(6)).m4a")
-        let memo = Memo(recordedAt: now, audioFile: url.lastPathComponent, state: .recording)
+        let memo = Memo(id: id, recordedAt: now, audioFile: url.lastPathComponent, state: .recording)
         // Claim the slot synchronously (no suspension since the check above), so a concurrent
         // start() sees it, and so recovery skips this memo from the moment it exists.
         activeMemoID = memo.id
