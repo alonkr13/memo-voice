@@ -17,6 +17,16 @@ public struct Memo: Codable, Identifiable, Sendable, Equatable {
     public var driveFileId: String?
     public var lastError: String?
     public var waitingReason: String?
+    /// Times a transcription of this memo started and did not finish on its own (it is counted
+    /// when the memo enters `transcribing`; a deliberate pause, e.g. for a new recording, gives
+    /// it back). At `Memo.maxTranscribeAttempts` the memo is marked `failed` instead of being
+    /// tried again, so one memo that crashes or never fits in the time it gets can't block
+    /// the queue. Retry resets it.
+    public var transcribeAttempts: Int
+
+    public static let maxTranscribeAttempts = 3
+    public static let tooManyAttemptsMessage =
+        "Transcription was interrupted 3 times (app closed, out of memory or out of time). Tap Retry to try again."
 
     public init(
         id: UUID = UUID(),
@@ -29,7 +39,8 @@ public struct Memo: Codable, Identifiable, Sendable, Equatable {
         model: String? = nil,
         driveFileId: String? = nil,
         lastError: String? = nil,
-        waitingReason: String? = nil
+        waitingReason: String? = nil,
+        transcribeAttempts: Int = 0
     ) {
         self.id = id
         self.recordedAt = recordedAt
@@ -42,6 +53,7 @@ public struct Memo: Codable, Identifiable, Sendable, Equatable {
         self.driveFileId = driveFileId
         self.lastError = lastError
         self.waitingReason = waitingReason
+        self.transcribeAttempts = transcribeAttempts
     }
 
     /// Tolerant of missing optional fields (and durationSec) so schema additions don't break loading.
@@ -58,5 +70,6 @@ public struct Memo: Codable, Identifiable, Sendable, Equatable {
         driveFileId = try c.decodeIfPresent(String.self, forKey: .driveFileId)
         lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
         waitingReason = try c.decodeIfPresent(String.self, forKey: .waitingReason)
+        transcribeAttempts = try c.decodeIfPresent(Int.self, forKey: .transcribeAttempts) ?? 0
     }
 }

@@ -78,7 +78,8 @@ public actor MemoStore {
         try persist(memos.filter { $0.id != id })
     }
 
-    /// Call on launch: memos left mid-step by a kill/crash return to the previous retryable state.
+    /// Call on launch: memos left mid-step by a kill/crash return to the previous retryable state
+    /// (a `transcribing` memo that already used `Memo.maxTranscribeAttempts` becomes `failed`).
     /// - Parameters:
     ///   - excluding: memos to leave alone (e.g. the one being recorded right now).
     ///   - only: when set, recover just this memo.
@@ -90,7 +91,13 @@ public actor MemoStore {
             if let only, updated[index].id != only { continue }
             switch updated[index].state {
             case .transcribing:
-                updated[index].state = .recorded
+                // The attempt was counted when it started; too many and it stops blocking.
+                if updated[index].transcribeAttempts >= Memo.maxTranscribeAttempts {
+                    updated[index].state = .failed
+                    updated[index].lastError = Memo.tooManyAttemptsMessage
+                } else {
+                    updated[index].state = .recorded
+                }
             case .uploading:
                 updated[index].state = .transcribed
             case .recording:

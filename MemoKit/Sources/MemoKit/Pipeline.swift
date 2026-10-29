@@ -10,8 +10,15 @@ public protocol MemoUploading: Sendable {
 extension DriveClient: MemoUploading {}
 
 /// Takes memos from `recorded` to `done`: transcribe → upload Markdown (and optionally audio) →
-/// delete local audio. One memo at a time, oldest first; every state change is saved before the
-/// next step starts, so a kill or cancellation at any point is resumable.
+/// delete local audio. One memo at a time: fewest interrupted transcription attempts first, then
+/// oldest (so a memo that keeps running out of background time doesn't starve newer ones); every
+/// state change is saved before the next step starts, so a kill or cancellation at any point is
+/// resumable.
+///
+/// Nothing is transcribed while a recording is in progress (`activeRecordingID` non-nil): the
+/// recorder and whisper must not compete for CPU and memory in one process.
+/// `pauseForRecording()` stops a transcription already running; uploads of memos that are
+/// already transcribed continue during a recording (they are cheap network work).
 ///
 /// Runs are single-flight: a `processAll()` while another run is active asks that run to look
 /// again and waits for it, so only one transcriber is ever loaded.
@@ -37,6 +44,13 @@ public actor Pipeline {
     private let activeRecordingID: @Sendable () async -> UUID?
     /// The memo the running pass is processing at this moment.
     private var currentMemoID: UUID?
+    /// The whisper call in flight, so `pauseForRecording()` can stop just that.
+    private var transcription: Task<(text: String, detectedLanguage: String), Error>?
+    /// Set when the transcription in flight was stopped on purpose for a recording.
+    private var pausedForRecording = false
+    /// Set when this pipeline cancelled its own run (a background run taking over). Such a
+    /// cancel is not an interruption of the memo and doesn't use up one of its attempts.
+    private var cancelIsDeliberate = false
 
     private var current: Task<Void, Never>?
     private var currentIsBackground = false
@@ -78,6 +92,7 @@ public actor Pipeline {
     public func processAll(background: Bool = false, progress: ProgressHandler? = nil) async {
         while let running = current {
             if background && !currentIsBackground {
+                cancelIsDeliberate = true
                 running.cancel()
                 await running.value
                 continue   // another caller may have started a run meanwhile
@@ -101,6 +116,15 @@ public actor Pipeline {
         }
     }
 
+    /// Call right after a recording starts: stops a transcription in flight. Its memo goes back
+    /// to `recorded` without using up an attempt; the run carries on with uploads only, and the
+    /// memo is transcribed after the recording ends (the app processes on `.memoRecorded`).
+    public func pauseForRecording() {
+        guard let transcription else { return }
+        pausedForRecording = true
+        transcription.cancel()
+    }
+
     /// True while a background (BG task) run is active.
     public func isBackgroundRunActive() -> Bool {
         current != nil && currentIsBackground
@@ -119,6 +143,7 @@ public actor Pipeline {
                 memo.state = memo.transcript == nil ? .recorded : .transcribed
             }
             memo.lastError = nil
+            memo.transcribeAttempts = 0
         }
         // A memo orphaned mid-step (e.g. left `transcribing` by a cancelled/killed pass) goes back
         // to its retryable state, unless a pass is working on it or it is being recorded.
@@ -140,7 +165,8 @@ public actor Pipeline {
         state == .recorded || state == .transcribed
     }
 
-    private enum Outcome { case finished, waiting, cancelled, storeFailed }
+    /// `paused`: stopped for a recording; the memo is back in the queue and isn't counted.
+    private enum Outcome { case finished, waiting, paused, cancelled, storeFailed }
 
     private enum UploadBlock { case signedOut, offline(String) }
 
@@ -187,6 +213,7 @@ public actor Pipeline {
             do { try await store.recoverInterrupted(excluding: active.map { [$0] } ?? []) } catch { return }
             recovered = true
         }
+        cancelIsDeliberate = false
         var state = RunState()
         var attempted = Set<UUID>()
         var completed = 0
@@ -196,9 +223,12 @@ public actor Pipeline {
                 attempted.removeAll()
                 state.uploadBlock = nil
             }
+            // While recording, only uploads (transcribed memos) go ahead.
+            let recording = await activeRecordingID() != nil
             let queue = await store.all()
                 .filter { Self.isPending($0.state) && !attempted.contains($0.id) }
-                .sorted { $0.recordedAt < $1.recordedAt }
+                .filter { !recording || $0.state == .transcribed }
+                .sorted(by: Self.runsBefore)
             guard let memo = queue.first else {
                 if rerunRequested && !Task.isCancelled { continue }
                 break
@@ -217,9 +247,18 @@ public actor Pipeline {
             let outcome = await process(memo, background: background, state: &state, report: report)
             currentMemoID = nil
             if outcome == .cancelled || outcome == .storeFailed { break }
+            if outcome == .paused { continue }
             completed += 1
         }
         progressHandler?(Double(completed), completed)
+    }
+
+    /// Fewer interrupted transcription attempts first, then oldest.
+    static func runsBefore(_ a: Memo, _ b: Memo) -> Bool {
+        if a.transcribeAttempts != b.transcribeAttempts {
+            return a.transcribeAttempts < b.transcribeAttempts
+        }
+        return a.recordedAt < b.recordedAt
     }
 
     private func process(_ memo: Memo, background: Bool, state: inout RunState,
@@ -238,12 +277,23 @@ public actor Pipeline {
         let settings = settings()
         let model = WhisperModel.find(settings.modelId) ?? .ivritTurbo
         do {
+            // Interrupted too often (killed, out of memory, out of background time): stop
+            // retrying on its own and say why, so it can't block the queue forever.
+            if memo.transcribeAttempts >= Memo.maxTranscribeAttempts {
+                try await store.update(memo.id) {
+                    $0.state = .failed
+                    $0.lastError = Memo.tooManyAttemptsMessage
+                    $0.waitingReason = nil
+                }
+                return .finished
+            }
             guard await modelReady(model) else {
                 try await setWaiting(memo, Self.waitingForModel)
                 return .waiting
             }
             try await store.update(memo.id) {
                 $0.state = .transcribing
+                $0.transcribeAttempts += 1
                 $0.waitingReason = nil
                 $0.lastError = nil
             }
@@ -263,10 +313,26 @@ public actor Pipeline {
                 transcriber = makeTranscriber(model, background)
                 state.transcriber = (model.id, transcriber)
             }
-            // The ivrit model is Hebrew-tuned; other models follow the language setting.
-            let language = model.id == WhisperModel.ivritTurbo.id ? "he" : settings.language
-            let result = try await transcriber.transcribe(
-                samples: samples, language: language, progress: report)
+            let language = Self.language(for: model, setting: settings.language)
+            let task = Task { [transcriber] in
+                try await transcriber.transcribe(samples: samples, language: language, progress: report)
+            }
+            transcription = task
+            pausedForRecording = false
+            // A recording may have started after this memo was picked (pauseForRecording()
+            // only sees a transcription once it is stored above).
+            if await activeRecordingID() != nil {
+                pausedForRecording = true
+                task.cancel()
+            }
+            let result = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            // Finished anyway (a pause that came too late): keep the transcript.
+            transcription = nil
+            pausedForRecording = false
             try await store.update(memo.id) {
                 $0.state = .transcribed
                 $0.transcript = result.text
@@ -280,11 +346,18 @@ public actor Pipeline {
             memo.model = model.tag
             return .finished
         } catch {
-            let cancelled = Task.isCancelled || error is CancellationError
+            transcription = nil
+            let paused = pausedForRecording
+            pausedForRecording = false
+            let cancelled = !paused && (Task.isCancelled || error is CancellationError)
+            // A deliberate stop (for a recording, or a background run taking over) is not an
+            // interruption of the memo: give the attempt back.
+            let giveBack = paused || (cancelled && cancelIsDeliberate)
             do {
                 try await store.update(memo.id) {
-                    if cancelled {
+                    if paused || cancelled {
                         $0.state = .recorded
+                        if giveBack { $0.transcribeAttempts = max(0, $0.transcribeAttempts - 1) }
                     } else {
                         $0.state = .failed
                         $0.lastError = Self.describe(error)
@@ -293,8 +366,16 @@ public actor Pipeline {
             } catch {
                 return .storeFailed
             }
+            if paused { return Task.isCancelled ? .cancelled : .paused }
             return cancelled ? .cancelled : .finished
         }
+    }
+
+    /// The ivrit model is Hebrew-tuned: Auto means Hebrew with it; English is passed through.
+    /// Other models follow the setting (`auto` = whisper's own detection).
+    static func language(for model: WhisperModel, setting: String) -> String {
+        guard model.id == WhisperModel.ivritTurbo.id else { return setting }
+        return setting == "en" ? "en" : "he"
     }
 
     private func upload(_ memo: Memo, state: inout RunState) async -> Outcome {

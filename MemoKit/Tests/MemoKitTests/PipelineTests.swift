@@ -107,9 +107,10 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
 
     @discardableResult
     private func addMemo(_ env: Env, at t: TimeInterval = 1_000, state: MemoState = .recorded,
-                         transcript: String? = nil) async throws -> Memo {
+                         transcript: String? = nil, attempts: Int = 0) async throws -> Memo {
         let memo = Memo(recordedAt: Date(timeIntervalSince1970: t), durationSec: 3,
-                        audioFile: "\(UUID().uuidString).m4a", state: state, transcript: transcript)
+                        audioFile: "\(UUID().uuidString).m4a", state: state, transcript: transcript,
+                        transcribeAttempts: attempts)
         try Data("audio".utf8).write(to: env.audioURL(memo))
         try await env.store.add(memo)
         return memo
@@ -145,18 +146,146 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         #expect(await env.memo(orphan.id)?.state == .recorded)
     }
 
-    @Test func testProcessAllDuringActiveRecordingLeavesItRecording() async throws {
+    /// While a recording is in progress nothing is transcribed (whisper must not run alongside
+    /// the recorder); already-transcribed memos still upload. The recording memo is untouched.
+    @Test func testProcessAllDuringActiveRecordingDoesNotTranscribe() async throws {
         let probe = try makeEnv()   // only to create a memo id up front
-        let memo = try await addMemo(probe, state: .recording)
-        let id = memo.id
-        let env = try makeEnv(activeRecordingID: { id })
-        try await env.store.add(memo)
-        try Data("audio".utf8).write(to: env.audioURL(memo))
+        let recordingMemo = try await addMemo(probe, state: .recording)
+        let id = recordingMemo.id
+        let active = Box<UUID?>(id)
+        let env = try makeEnv(activeRecordingID: { active.value })
+        try await env.store.add(recordingMemo)
+        try Data("audio".utf8).write(to: env.audioURL(recordingMemo))
+        let waiting = try await addMemo(env, at: 500)
+        let ready = try await addMemo(env, at: 600, state: .transcribed, transcript: "hi")
+
         await env.pipeline.processAll()
         #expect(await env.memo(id)?.state == .recording)
+        #expect(env.calls.value.isEmpty)
+        let w = try #require(await env.memo(waiting.id))
+        #expect(w.state == .recorded)
+        #expect(w.transcribeAttempts == 0)
+        #expect(await env.memo(ready.id)?.state == .done)
+        #expect(await env.drive.uploads.map(\.memoId) == [ready.id])
         await env.pipeline.retry(id)
         #expect(await env.memo(id)?.state == .recording)
-        #expect(await env.drive.uploads.isEmpty)
+
+        // Recording over: the waiting memo is transcribed on the next pass.
+        active.mutate { $0 = nil }
+        await env.pipeline.processAll()
+        #expect(await env.memo(waiting.id)?.state == .done)
+        #expect(env.calls.value.count == 1)
+    }
+
+    /// A recording that starts mid-transcription stops whisper; the memo goes back to
+    /// `recorded` without using up an attempt, and is transcribed after the recording.
+    @Test func testRecordingStartPausesTranscription() async throws {
+        let active = Box<UUID?>(nil)
+        let hold = Box(true)
+        let env = try makeEnv(activeRecordingID: { active.value }, transcribe: { _, lang in
+            while hold.value { try await Task.sleep(for: .milliseconds(10)) }
+            return ("ok", lang)
+        })
+        let memo = try await addMemo(env)
+        let run = Task { await env.pipeline.processAll(background: true) }
+        for _ in 0..<300 where await env.memo(memo.id)?.state != .transcribing {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await env.memo(memo.id)?.transcribeAttempts == 1)
+        active.mutate { $0 = UUID() }       // the recorder claims its slot first...
+        await env.pipeline.pauseForRecording()   // ...then the app pauses the pipeline
+        await run.value                      // the run ends (nothing else it may do)
+        let paused = try #require(await env.memo(memo.id))
+        #expect(paused.state == .recorded)
+        #expect(paused.transcribeAttempts == 0)
+        #expect(paused.lastError == nil)
+        #expect(paused.transcript == nil)
+
+        hold.mutate { $0 = false }
+        active.mutate { $0 = nil }
+        await env.pipeline.processAll()
+        let done = try #require(await env.memo(memo.id))
+        #expect(done.state == .done)
+        #expect(done.transcript == "ok")
+        #expect(done.transcribeAttempts == 1)
+    }
+
+    @Test func testAttemptsCountedAndThreeStrikesFails() async throws {
+        let env = try makeEnv()
+        let fresh = try await addMemo(env, at: 1_000)
+        let exhausted = try await addMemo(env, at: 2_000, attempts: 3)
+        await env.pipeline.processAll()
+        #expect(await env.memo(fresh.id)?.transcribeAttempts == 1)
+        #expect(await env.memo(fresh.id)?.state == .done)
+        let m = try #require(await env.memo(exhausted.id))
+        #expect(m.state == .failed)
+        #expect(m.lastError == Memo.tooManyAttemptsMessage)
+        #expect(env.calls.value.count == 1)   // the exhausted memo wasn't transcribed again
+        #expect(FileManager.default.fileExists(atPath: env.audioURL(exhausted).path))
+    }
+
+    @Test func testRecoveryFailsMemoLeftTranscribingThreeTimes() async throws {
+        let env = try makeEnv()
+        let third = try await addMemo(env, at: 1_000, state: .transcribing, attempts: 3)
+        let second = try await addMemo(env, at: 2_000, state: .transcribing, attempts: 2)
+        await env.pipeline.processAll()
+        let t = try #require(await env.memo(third.id))
+        #expect(t.state == .failed)
+        #expect(t.lastError == Memo.tooManyAttemptsMessage)
+        // Two interruptions so far: it gets its third try.
+        let s = try #require(await env.memo(second.id))
+        #expect(s.state == .done)
+        #expect(s.transcribeAttempts == 3)
+    }
+
+    @Test func testRetryResetsAttempts() async throws {
+        let env = try makeEnv()
+        let memo = try await addMemo(env, attempts: 3)
+        await env.pipeline.processAll()
+        #expect(await env.memo(memo.id)?.state == .failed)
+        await env.pipeline.retry(memo.id)
+        let m = try #require(await env.memo(memo.id))
+        #expect(m.state == .done)
+        #expect(m.transcribeAttempts == 1)
+        #expect(m.lastError == nil)
+    }
+
+    @Test func testCancelledCountsAndFewerAttemptsGoFirst() async throws {
+        // An older memo that already ran out of time once goes after a newer untried one.
+        let env = try makeEnv()
+        let older = try await addMemo(env, at: 1_000, attempts: 1)
+        let newer = try await addMemo(env, at: 2_000)
+        await env.pipeline.processAll()
+        let names = await env.drive.uploads.map(\.name)
+        #expect(names == [MemoFile.filename(for: newer), MemoFile.filename(for: older)])
+    }
+
+    @Test func testRunsBeforeOrdering() {
+        let a = Memo(recordedAt: Date(timeIntervalSince1970: 1), audioFile: "a", transcribeAttempts: 2)
+        let b = Memo(recordedAt: Date(timeIntervalSince1970: 9), audioFile: "b", transcribeAttempts: 0)
+        let c = Memo(recordedAt: Date(timeIntervalSince1970: 5), audioFile: "c", transcribeAttempts: 0)
+        #expect([a, b, c].sorted(by: Pipeline.runsBefore).map(\.audioFile) == ["c", "b", "a"])
+    }
+
+    /// A background run taking over from a foreground one is the pipeline's own decision, not an
+    /// interruption of the memo: it doesn't use up an attempt.
+    @Test func testBackgroundTakeoverDoesNotCountAttempt() async throws {
+        let calls = Box(0)
+        let env = try makeEnv(transcribe: { _, lang in
+            calls.mutate { $0 += 1 }
+            if calls.value == 1 { try await Task.sleep(for: .seconds(60)) }
+            return ("ok", lang)
+        })
+        let memo = try await addMemo(env)
+        let foreground = Task { await env.pipeline.processAll() }
+        for _ in 0..<300 where await env.memo(memo.id)?.state != .transcribing {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await env.pipeline.processAll(background: true)
+        await foreground.value
+        let m = try #require(await env.memo(memo.id))
+        #expect(m.state == .done)
+        #expect(m.transcribeAttempts == 1)
     }
 
     @Test func testHappyPath() async throws {
@@ -323,12 +452,16 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
     }
 
     @Test func testLanguageChoice() async throws {
-        // ivrit is Hebrew-tuned: always "he", whatever the setting.
-        var s = AppSettings(); s.language = "auto"
-        let env = try makeEnv(settings: s)
-        try await addMemo(env)
-        await env.pipeline.processAll()
-        #expect(env.calls.value == ["he"])
+        // ivrit is Hebrew-tuned: Auto means Hebrew; Hebrew and English pass through.
+        for (setting, expected) in [("auto", "he"), ("he", "he"), ("en", "en")] {
+            var s = AppSettings(); s.language = setting
+            let env = try makeEnv(settings: s)
+            try await addMemo(env)
+            await env.pipeline.processAll()
+            #expect(env.calls.value == [expected], "setting \(setting)")
+        }
+        #expect(Pipeline.language(for: .small, setting: "auto") == "auto")
+        #expect(Pipeline.language(for: .ivritTurbo, setting: "auto") == "he")
 
         // small follows the setting and records the detected language.
         var s2 = AppSettings(); s2.language = "auto"; s2.modelId = WhisperModel.small.id
@@ -382,6 +515,8 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         #expect(m.state == .recorded)
         #expect(m.lastError == nil)
         #expect(m.transcript == nil)
+        // Running out of (background) time counts as an interrupted attempt.
+        #expect(m.transcribeAttempts == 1)
         #expect(FileManager.default.fileExists(atPath: env.audioURL(memo).path))
     }
 

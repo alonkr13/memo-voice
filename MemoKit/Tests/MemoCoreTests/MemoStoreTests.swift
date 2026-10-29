@@ -89,7 +89,26 @@ import Testing
         try Data(json.utf8).write(to: file)
         let store = MemoStore(file: file, audioDir: dir)
         #expect(await store.all().first?.id == id)
+        #expect(await store.all().first?.transcribeAttempts == 0)
         #expect(await store.recoveredFromCorruptQueue == nil)
+    }
+
+    @Test func testAttemptsPersistAndThirdInterruptionFailsOnRecovery() async throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("queue.json")
+        let twice = Memo(audioFile: "a.m4a", state: .transcribing, transcribeAttempts: 2)
+        let thrice = Memo(audioFile: "b.m4a", state: .transcribing, transcribeAttempts: 3)
+        let store = MemoStore(file: file, audioDir: dir)
+        try await store.add(twice)
+        try await store.add(thrice)
+        try await MemoStore(file: file, audioDir: dir).recoverInterrupted()
+
+        let byId = Dictionary(uniqueKeysWithValues:
+            await MemoStore(file: file, audioDir: dir).all().map { ($0.id, $0) })
+        #expect(byId[twice.id]?.state == .recorded)
+        #expect(byId[twice.id]?.transcribeAttempts == 2)
+        #expect(byId[thrice.id]?.state == .failed)
+        #expect(byId[thrice.id]?.lastError == Memo.tooManyAttemptsMessage)
     }
 
     @Test func testAddThrowsWhenFileNotWritable() async throws {
