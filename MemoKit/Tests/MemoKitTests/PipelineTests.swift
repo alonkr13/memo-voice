@@ -45,6 +45,19 @@ private struct FakeTranscriber: Transcribing {
     }
 }
 
+/// Reports progress as whisper would, through the progress-aware entry point.
+private struct ProgressingTranscriber: Transcribing {
+    func transcribe(samples: [Float], language: String) async throws -> (text: String, detectedLanguage: String) {
+        try await transcribe(samples: samples, language: language, progress: nil)
+    }
+    func transcribe(samples: [Float], language: String,
+                    progress: (@Sendable (Double) -> Void)?) async throws -> (text: String, detectedLanguage: String) {
+        progress?(0.5)
+        progress?(1.0)
+        return ("x", language)
+    }
+}
+
 private struct Boom: Error, LocalizedError { var errorDescription: String? { "boom" } }
 
 @Suite struct PipelineTests {
@@ -63,6 +76,7 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
     private func makeEnv(
         settings: AppSettings = AppSettings(),
         modelReady: Bool = true,
+        transcriber custom: (any Transcribing)? = nil,
         transcribe: (@Sendable ([Float], String) async throws -> (text: String, detectedLanguage: String))? = nil
     ) throws -> Env {
         let dir = FileManager.default.temporaryDirectory
@@ -73,7 +87,7 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         let calls = Box<[String]>([])
         let factoryCalls = Box<[Bool]>([])
         let handler = transcribe ?? { _, lang in ("שלום עולם", lang == "auto" ? "en" : lang) }
-        let transcriber = FakeTranscriber { samples, lang in
+        let transcriber: any Transcribing = custom ?? FakeTranscriber { samples, lang in
             calls.mutate { $0.append(lang) }
             return try await handler(samples, lang)
         }
@@ -156,6 +170,7 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         #expect(m.lastError?.isEmpty == false)
         #expect(m.waitingReason == nil)
         #expect(FileManager.default.fileExists(atPath: env.audioURL(memo).path))
+        #expect(await env.pipeline.hasProcessableWork() == true)
 
         // Network back: the next run uploads it without transcribing again.
         await env.drive.setDefaultError(nil)
@@ -204,6 +219,9 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         #expect(m.waitingReason == "Model not downloaded")
         #expect(m.lastError == nil)
         #expect(env.calls.value.isEmpty)
+        // Waiting isn't processable work: a BG task may report success.
+        #expect(await env.pipeline.hasProcessableWork() == false)
+        #expect(await env.pipeline.pendingCount() == 1)
     }
 
     @Test func testWaitsForSignIn() async throws {
@@ -318,6 +336,48 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         #expect(m.lastError == nil)
         #expect(m.transcript == nil)
         #expect(FileManager.default.fileExists(atPath: env.audioURL(memo).path))
+    }
+
+    /// A joiner (e.g. a short background-time pass) that gets cancelled must only stop waiting:
+    /// the shared run it joined keeps going and finishes the memo.
+    @Test func testCancelledJoinerDoesNotCancelRun() async throws {
+        let env = try makeEnv(transcribe: { _, lang in
+            try await Task.sleep(for: .milliseconds(600))   // throws if the run is cancelled
+            return ("ok", lang)
+        })
+        let memo = try await addMemo(env)
+        let owner = Task { await env.pipeline.processAll(background: true) }
+        for _ in 0..<200 where await env.memo(memo.id)?.state != .transcribing {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await env.pipeline.isBackgroundRunActive())
+        let joiner = Task { await env.pipeline.processAll() }
+        try await Task.sleep(for: .milliseconds(50))
+        joiner.cancel()
+        await joiner.value
+        // The joiner returned without waiting for the run to finish...
+        #expect(await env.memo(memo.id)?.state == .transcribing)
+        // ...and the owner's run still completes the memo.
+        await owner.value
+        let m = try #require(await env.memo(memo.id))
+        #expect(m.state == .done)
+        #expect(m.transcript == "ok")
+        #expect(await env.pipeline.isBackgroundRunActive() == false)
+    }
+
+    @Test func testTranscriptionProgressIsForwarded() async throws {
+        let env = try makeEnv(transcriber: ProgressingTranscriber())
+        try await addMemo(env)
+        let seen = Box<[Double]>([])
+        await env.pipeline.processAll(background: true) { done, total in
+            #expect(total == 1)
+            seen.mutate { $0.append(done) }
+        }
+        let values = seen.value
+        #expect(values.first == 0)
+        #expect(values.contains { $0 > 0 && $0 < 1 })   // mid-transcription progress
+        #expect(values.last == 1)
+        #expect(values == values.sorted())              // never goes backwards
     }
 
     @Test func testSingleFlight() async throws {

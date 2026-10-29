@@ -8,6 +8,20 @@ public protocol Transcribing: Sendable {
     /// - Returns: the joined segment text and the language whisper used / detected.
     func transcribe(samples: [Float], language: String) async throws
         -> (text: String, detectedLanguage: String)
+
+    /// Same, reporting progress (0...1) while it runs. Called from any thread.
+    func transcribe(samples: [Float], language: String,
+                    progress: (@Sendable (Double) -> Void)?) async throws
+        -> (text: String, detectedLanguage: String)
+}
+
+extension Transcribing {
+    /// Default for transcribers that can't report progress.
+    public func transcribe(samples: [Float], language: String,
+                           progress: (@Sendable (Double) -> Void)?) async throws
+        -> (text: String, detectedLanguage: String) {
+        try await transcribe(samples: samples, language: language)
+    }
 }
 
 public enum TranscriberError: Error, Equatable, LocalizedError {
@@ -50,12 +64,20 @@ public final class WhisperTranscriber: Transcribing, @unchecked Sendable {
     /// `CancellationError`, so an expiring background task stops within moments.
     public func transcribe(samples: [Float], language: String) async throws
         -> (text: String, detectedLanguage: String) {
+        try await transcribe(samples: samples, language: language, progress: nil)
+    }
+
+    public func transcribe(samples: [Float], language: String,
+                           progress: (@Sendable (Double) -> Void)?) async throws
+        -> (text: String, detectedLanguage: String) {
         let abort = AbortFlag()
+        let sink = ProgressSink(progress)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
                 queue.async {
                     do {
-                        cont.resume(returning: try self.run(samples: samples, language: language, abort: abort))
+                        cont.resume(returning: try self.run(
+                            samples: samples, language: language, abort: abort, sink: sink))
                     } catch {
                         cont.resume(throwing: error)
                     }
@@ -92,7 +114,7 @@ public final class WhisperTranscriber: Transcribing, @unchecked Sendable {
         return ctx
     }
 
-    private func run(samples: [Float], language: String, abort: AbortFlag) throws
+    private func run(samples: [Float], language: String, abort: AbortFlag, sink: ProgressSink) throws
         -> (text: String, detectedLanguage: String) {
         let lang = language.isEmpty ? "auto" : language
         if abort.isSet { throw CancellationError() }
@@ -123,8 +145,14 @@ public final class WhisperTranscriber: Transcribing, @unchecked Sendable {
             return Unmanaged<AbortFlag>.fromOpaque(data).takeUnretainedValue().isSet
         }
         params.abort_callback_user_data = Unmanaged.passUnretained(abort).toOpaque()
+        // Percent done, reported by whisper as it moves through the audio.
+        params.progress_callback = { _, _, percent, data in
+            guard let data else { return }
+            Unmanaged<ProgressSink>.fromOpaque(data).takeUnretainedValue().report(Double(percent) / 100)
+        }
+        params.progress_callback_user_data = Unmanaged.passUnretained(sink).toOpaque()
 
-        let status: Int32 = withExtendedLifetime(abort) {
+        let status: Int32 = withExtendedLifetime((abort, sink)) {
             lang.withCString { cLang in
                 params.language = cLang
                 return input.withUnsafeBufferPointer { buf in
@@ -156,6 +184,13 @@ public final class WhisperTranscriber: Transcribing, @unchecked Sendable {
         }
         return (text, detected)
     }
+}
+
+/// Forwards whisper's C progress callback to a Swift closure.
+final class ProgressSink: @unchecked Sendable {
+    private let handler: (@Sendable (Double) -> Void)?
+    init(_ handler: (@Sendable (Double) -> Void)?) { self.handler = handler }
+    func report(_ fraction: Double) { handler?(fraction) }
 }
 
 /// Cancellation flag shared between a Swift task and whisper's C abort callback.

@@ -18,8 +18,9 @@ public actor Pipeline {
     /// Creates the transcriber for a run. `background` is true when running from a background
     /// task, where iOS forbids Metal work, so the caller should create a CPU-only transcriber.
     public typealias TranscriberFactory = @Sendable (_ model: WhisperModel, _ background: Bool) -> any Transcribing
-    /// Called with the number of memos finished in this run and the number seen so far.
-    public typealias ProgressHandler = @Sendable (_ completed: Int, _ total: Int) -> Void
+    /// Called with the memos finished in this run (fractional: the current memo's transcription
+    /// progress is included) and the number of memos seen so far.
+    public typealias ProgressHandler = @Sendable (_ completed: Double, _ total: Int) -> Void
 
     public static let waitingForModel = "Model not downloaded"
     public static let waitingForSignIn = "Not signed in to Google"
@@ -37,6 +38,8 @@ public actor Pipeline {
     private var rerunRequested = false
     private var progressHandler: ProgressHandler?
     private var recovered = false
+    /// Callers that joined the current run and are waiting for it to end.
+    private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     public init(
         store: MemoStore,
@@ -74,11 +77,9 @@ public actor Pipeline {
             }
             if let progress { progressHandler = progress }
             rerunRequested = true
-            await withTaskCancellationHandler {
-                await running.value
-            } onCancel: {
-                running.cancel()
-            }
+            // A joiner doesn't own the run: if it is cancelled it just stops waiting. Only the
+            // owner (or a background takeover) may cancel the shared run.
+            await waitForCurrentRun()
             return
         }
         let task = Task { await self.run(background: background) }
@@ -91,6 +92,17 @@ public actor Pipeline {
         } onCancel: {
             task.cancel()
         }
+    }
+
+    /// True while a background (BG task) run is active.
+    public func isBackgroundRunActive() -> Bool {
+        current != nil && currentIsBackground
+    }
+
+    /// Memos a run would act on now: pending and not waiting for the model or a sign-in.
+    /// (Upload errors such as offline count: they are retried.)
+    public func hasProcessableWork() async -> Bool {
+        await store.all().contains { Self.isPending($0.state) && $0.waitingReason == nil }
     }
 
     /// Puts a failed memo (or one with an upload error) back in the queue and processes it.
@@ -131,6 +143,26 @@ public actor Pipeline {
         // caller either joined this run (and was served) or finds `current == nil` and starts one.
         current = nil
         progressHandler = nil
+        let pending = waiters
+        waiters.removeAll()
+        for cont in pending.values { cont.resume() }
+    }
+
+    /// Waits until the current run ends, or until the calling task is cancelled.
+    private func waitForCurrentRun() async {
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                if current == nil || Task.isCancelled { cont.resume(); return }
+                waiters[id] = cont
+            }
+        } onCancel: {
+            Task { await self.stopWaiting(id) }
+        }
+    }
+
+    private func stopWaiting(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume()
     }
 
     private func runLoop(background: Bool) async {
@@ -158,26 +190,35 @@ public actor Pipeline {
                 break
             }
             attempted.insert(memo.id)
-            progressHandler?(completed, completed + queue.count)
+            let base = Double(completed)
+            let total = completed + queue.count
+            let handler = progressHandler
+            handler?(base, total)
+            // Transcription is most of a memo's work: it fills 90 % of the memo's share.
+            let report: @Sendable (Double) -> Void = { fraction in
+                handler?(base + 0.9 * min(max(fraction, 0), 1), total)
+            }
 
-            let outcome = await process(memo, background: background, state: &state)
+            let outcome = await process(memo, background: background, state: &state, report: report)
             if outcome == .cancelled || outcome == .storeFailed { break }
             completed += 1
         }
-        progressHandler?(completed, completed)
+        progressHandler?(Double(completed), completed)
     }
 
-    private func process(_ memo: Memo, background: Bool, state: inout RunState) async -> Outcome {
+    private func process(_ memo: Memo, background: Bool, state: inout RunState,
+                         report: @escaping @Sendable (Double) -> Void) async -> Outcome {
         var memo = memo
         if memo.state == .recorded {
-            let outcome = await transcribe(&memo, background: background, state: &state)
+            let outcome = await transcribe(&memo, background: background, state: &state, report: report)
             guard outcome == .finished else { return outcome }
         }
         guard memo.state == .transcribed else { return .finished }
         return await upload(memo, state: &state)
     }
 
-    private func transcribe(_ memo: inout Memo, background: Bool, state: inout RunState) async -> Outcome {
+    private func transcribe(_ memo: inout Memo, background: Bool, state: inout RunState,
+                            report: @escaping @Sendable (Double) -> Void) async -> Outcome {
         let settings = settings()
         let model = WhisperModel.find(settings.modelId) ?? .ivritTurbo
         do {
@@ -208,7 +249,8 @@ public actor Pipeline {
             }
             // The ivrit model is Hebrew-tuned; other models follow the language setting.
             let language = model.id == WhisperModel.ivritTurbo.id ? "he" : settings.language
-            let result = try await transcriber.transcribe(samples: samples, language: language)
+            let result = try await transcriber.transcribe(
+                samples: samples, language: language, progress: report)
             try await store.update(memo.id) {
                 $0.state = .transcribed
                 $0.transcript = result.text

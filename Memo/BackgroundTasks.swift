@@ -104,8 +104,11 @@ enum BackgroundTasks {
     /// goes to the `BGProcessingTask`.
     @MainActor static func didEnterBackground() {
         Task { @MainActor in
-            guard await AppServices.pipeline.pendingCount() > 0 else { return }
+            let pipeline = AppServices.pipeline
+            guard await pipeline.pendingCount() > 0 else { return }
             scheduleProcessing()
+            // A BG task's run is already CPU-only and owns its own time; don't pile on.
+            guard !(await pipeline.isBackgroundRunActive()) else { return }
             processNow()
         }
     }
@@ -147,15 +150,22 @@ enum BackgroundTasks {
         if continued {
             progress = { done, total in
                 guard let task = ref.task as? BGContinuedProcessingTask else { return }
-                task.progress.totalUnitCount = Int64(max(total, 1))
-                task.progress.completedUnitCount = Int64(min(done, max(total, 1)))
-                let subtitle = done < total ? "Memo \(done + 1) of \(total)" : "Done"
+                // 100 units per memo, so a long transcription keeps advancing.
+                let units = Int64(max(total, 1)) * 100
+                task.progress.totalUnitCount = units
+                task.progress.completedUnitCount = min(Int64(done * 100), units)
+                let index = Int(done)
+                let subtitle = index < total ? "Memo \(index + 1) of \(total)" : "Done"
                 task.updateTitle(title, subtitle: subtitle)
             }
         }
-        await AppServices.pipeline.processAll(background: true, progress: progress)
+        let pipeline = AppServices.pipeline
+        await pipeline.processAll(background: true, progress: progress)
         let expired = Task.isCancelled
-        if await AppServices.pipeline.pendingCount() > 0 { scheduleProcessing() }
-        ref.task.setTaskCompleted(success: !expired)
+        if await pipeline.pendingCount() > 0 { scheduleProcessing() }
+        // Success only if nothing processable is left (memos waiting for the model or a
+        // sign-in can't be helped by more background time).
+        let unfinished = await pipeline.hasProcessableWork()
+        ref.task.setTaskCompleted(success: !expired && !unfinished)
     }
 }
