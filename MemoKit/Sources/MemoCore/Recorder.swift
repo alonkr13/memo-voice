@@ -46,7 +46,7 @@ public extension Notification.Name {
 /// Microphone permission is the caller's job.
 @MainActor
 public final class Recorder: NSObject {
-    public static let memoIDKey = "memoID"
+    nonisolated public static let memoIDKey = "memoID"
 
     public private(set) var isRecording = false
     /// The memo being recorded or finalized right now (nil when idle). Processing and UI must

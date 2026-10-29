@@ -198,10 +198,12 @@ final class AppRecordingController: RecordingControlling {
     }
 
     private func endLiveActivities() {
-        let activities = Activity<RecordingActivity>.activities
-        guard !activities.isEmpty else { return }
-        Task {
-            for activity in activities {
+        // Snapshot the IDs now, so an activity for a recording started right after this call
+        // is never ended by it.
+        let ids = Set(Activity<RecordingActivity>.activities.map(\.id))
+        guard !ids.isEmpty else { return }
+        Task.detached {
+            for activity in Activity<RecordingActivity>.activities where ids.contains(activity.id) {
                 await activity.end(nil, dismissalPolicy: .immediate)
             }
         }
