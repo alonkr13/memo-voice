@@ -183,7 +183,10 @@ private func query(_ req: URLRequest, _ name: String) -> String? {
             if req.url!.path.hasPrefix("/upload") {
                 return counter.next() == 0 ? (404, "gone") : (200, #"{"id":"NEW_FILE"}"#)
             }
-            if req.httpMethod == "GET" { return (200, #"{"files":[{"id":"FOLDER"}]}"#) }
+            if req.httpMethod == "GET" {
+                if (query(req, "q") ?? "").contains("appProperties") { return (200, #"{"files":[]}"#) }
+                return (200, #"{"files":[{"id":"FOLDER"}]}"#)
+            }
             return (200, #"{"id":"NEWFOLDER"}"#)
         }
         let id = try await makeClient().upload(
@@ -191,9 +194,58 @@ private func query(_ req: URLRequest, _ name: String) -> String? {
         #expect(id == "NEW_FILE")
         let uploads = StubURLProtocol.requests.filter { $0.0.url!.path.hasPrefix("/upload") }
         #expect(uploads.count == 2)
-        // The folder was resolved twice: once initially, once after the cache was dropped.
-        let lists = StubURLProtocol.requests.filter { $0.0.httpMethod == "GET" }
-        #expect(lists.count == 2)
+        // The folder was resolved twice: once initially, once after the 404 dropped the cache.
+        let folderLists = StubURLProtocol.requests.filter {
+            $0.0.httpMethod == "GET" && (query($0.0, "q") ?? "").contains("mimeType")
+        }
+        #expect(folderLists.count == 2)
+    }
+
+    @Test func testConvenienceUploadDedupesByMemoId() async throws {
+        StubURLProtocol.reset { req, _ in
+            if req.httpMethod == "GET" {
+                if (query(req, "q") ?? "").contains("appProperties") { return (200, #"{"files":[{"id":"EXISTING"}]}"#) }
+                return (200, #"{"files":[{"id":"FOLDER"}]}"#)
+            }
+            return (200, #"{"id":"SHOULD_NOT_HAPPEN"}"#)
+        }
+        let id = try await makeClient().upload(
+            name: "m.md", data: Data("x".utf8), mimeType: "text/markdown", folderPath: "Memos", memoId: UUID())
+        #expect(id == "EXISTING")
+        #expect(StubURLProtocol.requests.filter { $0.0.httpMethod == "POST" }.isEmpty)
+    }
+
+    @Test func testTrashedCachedFolderIsReplaced() async throws {
+        StubURLProtocol.reset { req, _ in
+            let path = req.url!.path
+            if path.hasSuffix("/files/OLD") { return (200, #"{"id":"OLD","trashed":true}"#) }
+            if path.hasPrefix("/upload") { return (200, #"{"id":"UP"}"#) }
+            if req.httpMethod == "GET" { return (200, #"{"files":[]}"#) }  // no live folder, no existing file
+            return (200, #"{"id":"NEWFOLDER"}"#)  // folder create
+        }
+        let defaults = UserDefaults(suiteName: "drive-\(UUID().uuidString)")!
+        defaults.set("OLD", forKey: "memo.drive.folderId.Memos")
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StubURLProtocol.self]
+        let client = DriveClient(tokens: StubTokens(), session: URLSession(configuration: cfg), defaults: defaults)
+        let id = try await client.upload(
+            name: "m.md", data: Data("x".utf8), mimeType: "text/markdown", folderPath: "Memos", memoId: UUID())
+        #expect(id == "UP")
+        let upload = StubURLProtocol.requests.first { $0.0.url!.path.hasPrefix("/upload") }!
+        #expect(String(decoding: upload.1, as: UTF8.self).contains(#""parents":["NEWFOLDER"]"#))
+        #expect(defaults.string(forKey: "memo.drive.folderId.Memos") == "NEWFOLDER")
+    }
+
+    @Test func testQueryEncodesPlusAndAmpersand() async throws {
+        StubURLProtocol.reset { _, _ in (200, #"{"files":[{"id":"F"}]}"#) }
+        _ = try await makeClient().ensureFolder(path: "C++ & a=b#c")
+        let raw = StubURLProtocol.requests[0].0.url!.absoluteString
+        #expect(raw.contains("%2B"))
+        #expect(!raw.contains("+"))
+        #expect(raw.contains("%26"))
+        #expect(raw.contains("%3D"))
+        #expect(raw.contains("%23"))
+        #expect((query(StubURLProtocol.requests[0].0, "q") ?? "").contains("name = 'C++ & a=b#c'"))
     }
 
     @Test func testNetworkErrorMapped() async throws {
@@ -204,5 +256,36 @@ private func query(_ req: URLRequest, _ name: String) -> String? {
         } catch DriveError.network(let e) {
             #expect((e as? URLError)?.code == .notConnectedToInternet)
         }
+    }
+}
+
+@Suite struct GoogleAuthErrorMappingTests {
+    private func isNetwork(_ e: Error) -> Bool { if case DriveError.network = e { return true }; return false }
+    private func isNotSignedIn(_ e: Error) -> Bool { if case DriveError.notSignedIn = e { return true }; return false }
+
+    @Test func testURLErrorIsNetwork() {
+        #expect(isNetwork(GoogleAuth.map(URLError(.notConnectedToInternet))))
+        #expect(isNetwork(GoogleAuth.map(URLError(.timedOut))))
+        #expect(isNetwork(GoogleAuth.map(URLError(.networkConnectionLost))))
+    }
+
+    @Test func testWrappedNetworkErrorIsNetwork() {
+        let inner = NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet)
+        let wrapped = NSError(domain: "org.openid.appauth.general", code: -5,
+                              userInfo: [NSUnderlyingErrorKey: inner])
+        let outer = NSError(domain: "com.google.GIDSignIn", code: -1, userInfo: [NSUnderlyingErrorKey: wrapped])
+        #expect(isNetwork(GoogleAuth.map(outer)))
+    }
+
+    @Test func testAuthErrorsAreNotSignedIn() {
+        #expect(isNotSignedIn(GoogleAuth.map(NSError(domain: "com.google.GIDSignIn", code: -4))))
+        #expect(isNotSignedIn(GoogleAuth.map(
+            NSError(domain: "org.openid.appauth.oauth_token", code: -2, userInfo: ["error": "invalid_grant"]))))
+    }
+
+    @Test func testUnknownErrorIsNotMisreportedAsSignedOut() {
+        let mapped = GoogleAuth.map(NSError(domain: "something.else", code: 7))
+        #expect(!isNotSignedIn(mapped))
+        #expect(!isNetwork(mapped))
     }
 }

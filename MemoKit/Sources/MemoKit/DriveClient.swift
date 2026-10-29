@@ -60,6 +60,20 @@ public final class DriveClient: @unchecked Sendable {
         "memo.drive.folderId." + segments.joined(separator: "/")
     }
 
+    /// Builds a URL with a strictly percent-encoded query. `URLQueryItem` leaves `+`, `&`, `=`
+    /// and `#` alone in values, and Drive decodes `+` as a space, so encode everything but unreserved.
+    static func makeURL(_ base: String, _ items: [(String, String)]) -> URL {
+        var comps = URLComponents(string: base)!
+        comps.percentEncodedQuery = items.map { "\(encode($0.0))=\(encode($0.1))" }.joined(separator: "&")
+        return comps.url!
+    }
+
+    static func encode(_ v: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return v.addingPercentEncoding(withAllowedCharacters: allowed) ?? v
+    }
+
     /// Escapes a value for use inside a single-quoted Drive query string.
     static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
@@ -76,9 +90,7 @@ public final class DriveClient: @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .withoutEscapingSlashes
         let body = try encoder.encode(Body(name: name, mimeType: Self.folderMime, parents: [parent]))
-        var comps = URLComponents(string: Self.filesURL)!
-        comps.queryItems = [URLQueryItem(name: "fields", value: "id")]
-        var req = URLRequest(url: comps.url!)
+        var req = URLRequest(url: Self.makeURL(Self.filesURL, [("fields", "id")]))
         req.httpMethod = "POST"
         req.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
@@ -111,20 +123,18 @@ public final class DriveClient: @unchecked Sendable {
         body.append(data)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 
-        var comps = URLComponents(string: Self.uploadURL)!
-        comps.queryItems = [URLQueryItem(name: "uploadType", value: "multipart"),
-                            URLQueryItem(name: "fields", value: "id")]
-        var req = URLRequest(url: comps.url!)
+        var req = URLRequest(url: Self.makeURL(Self.uploadURL, [("uploadType", "multipart"), ("fields", "id")]))
         req.httpMethod = "POST"
         req.setValue("multipart/related; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
         return try decodeID(try await send(req))
     }
 
-    /// Ensures the folder, uploads, and if the cached folder has vanished (404) forgets the
-    /// cache, re-creates the path and retries once.
+    /// Resolves the folder, skips the upload if this memo is already in it (dedupe), uploads, and if
+    /// the folder has vanished (404) forgets the cache, re-creates the path and retries once.
     public func upload(name: String, data: Data, mimeType: String, folderPath: String, memoId: UUID) async throws -> String {
-        let parent = try await ensureFolder(path: folderPath)
+        let parent = try await validatedFolder(path: folderPath)
+        if let existing = try await findFile(memoId: memoId, parent: parent) { return existing }
         do {
             return try await upload(name: name, data: data, mimeType: mimeType, parent: parent, memoId: memoId)
         } catch DriveError.http(404, _) {
@@ -134,16 +144,35 @@ public final class DriveClient: @unchecked Sendable {
         }
     }
 
+    /// Like `ensureFolder`, but a cached ID is checked first: Drive accepts uploads into a trashed
+    /// parent, so a trashed (or deleted) cached folder must be dropped and re-resolved.
+    private func validatedFolder(path: String) async throws -> String {
+        let key = Self.cacheKey(Self.segments(path))
+        if let cached = defaults.string(forKey: key) {
+            if try await folderIsUsable(id: cached) { return cached }
+            defaults.removeObject(forKey: key)
+        }
+        return try await ensureFolder(path: path)
+    }
+
+    private func folderIsUsable(id: String) async throws -> Bool {
+        struct Info: Decodable { let trashed: Bool? }
+        var req = URLRequest(url: Self.makeURL("\(Self.filesURL)/\(Self.encode(id))", [("fields", "id,trashed")]))
+        req.httpMethod = "GET"
+        do {
+            let data = try await send(req)
+            return try JSONDecoder().decode(Info.self, from: data).trashed != true
+        } catch DriveError.http(404, _) {
+            return false
+        }
+    }
+
     // MARK: Plumbing
 
     private func listFirst(query: String) async throws -> String? {
         struct List: Decodable { struct F: Decodable { let id: String }; let files: [F]? }
-        var comps = URLComponents(string: Self.filesURL)!
-        comps.queryItems = [URLQueryItem(name: "q", value: query),
-                            URLQueryItem(name: "fields", value: "files(id)"),
-                            URLQueryItem(name: "spaces", value: "drive"),
-                            URLQueryItem(name: "pageSize", value: "1")]
-        var req = URLRequest(url: comps.url!)
+        var req = URLRequest(url: Self.makeURL(Self.filesURL, [
+            ("q", query), ("fields", "files(id)"), ("spaces", "drive"), ("pageSize", "1")]))
         req.httpMethod = "GET"
         let data = try await send(req)
         return try JSONDecoder().decode(List.self, from: data).files?.first?.id
