@@ -7,6 +7,9 @@ import MemoKit
 enum AppServices {
     static let store = MemoStore(file: AppPaths.queueFile, audioDir: AppPaths.audioDir)
 
+    /// The in-app recorder behind the memo list's Record button (see `RecordingControlling`).
+    static let recorder = AppRecordingController()
+
     static let drive = DriveClient(tokens: GoogleAuth.shared)
 
     static let pipeline = Pipeline(

@@ -157,4 +157,28 @@ import Testing
         try Data("not json".utf8).write(to: url)
         #expect(AppSettings.load(from: url) == AppSettings())
     }
+
+    @Test func testRemovePersistsAndIgnoresUnknownId() async throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("queue.json")
+        let keep = Memo(audioFile: "keep.m4a", state: .done)
+        let drop = Memo(audioFile: "drop.m4a", state: .failed)
+        let store = MemoStore(file: file, audioDir: dir)
+        try await store.add(keep)
+        try await store.add(drop)
+
+        try await store.remove(UUID())
+        #expect(await store.all() == [keep, drop])
+
+        try await store.remove(drop.id)
+        #expect(await store.all() == [keep])
+        #expect(await MemoStore(file: file, audioDir: dir).all() == [keep])
+    }
+
+    @Test func testNormalizedFolderPath() {
+        #expect(AppSettings.normalizedFolderPath("  /Memos/ ") == "Memos")
+        #expect(AppSettings.normalizedFolderPath("a//b / c/") == "a/b/c")
+        #expect(AppSettings.normalizedFolderPath("תיקייה/הערות") == "תיקייה/הערות")
+        #expect(AppSettings.normalizedFolderPath(" / ") == "")
+    }
 }

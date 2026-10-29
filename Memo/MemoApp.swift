@@ -23,17 +23,7 @@ struct MemoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            NavigationStack {
-                List {
-                    Section {
-                        Text("App Group: \(AppPaths.usingAppGroup ? "yes" : "no")")
-                    }
-                    Section("Debug") {
-                        NavigationLink("Transcription test") { DebugTranscriptionView() }
-                    }
-                }
-                .navigationTitle("Memo")
-            }
+            NavigationStack { MemoListView() }
             .task { await ModelManager.shared.reconnect() }
             .onOpenURL { GoogleAuth.handle($0) }
             .onChange(of: scenePhase, initial: true) { _, phase in

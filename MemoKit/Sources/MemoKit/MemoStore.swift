@@ -71,6 +71,13 @@ public actor MemoStore {
         try persist(updated)
     }
 
+    /// Removes a memo from the queue (persisted before it is dropped from memory). Deleting its
+    /// audio file is the caller's job.
+    public func remove(_ id: UUID) throws {
+        guard memos.contains(where: { $0.id == id }) else { return }
+        try persist(memos.filter { $0.id != id })
+    }
+
     /// Call on launch: memos left mid-step by a kill/crash return to the previous retryable state.
     public func recoverInterrupted() throws {
         let fm = FileManager.default

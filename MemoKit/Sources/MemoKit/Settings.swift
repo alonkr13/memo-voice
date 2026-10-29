@@ -25,6 +25,17 @@ public struct AppSettings: Codable, Sendable, Equatable {
         keepAudio = try c.decodeIfPresent(Bool.self, forKey: .keepAudio) ?? d.keepAudio
     }
 
+    public static let defaultFolderPath = "Memos"
+
+    /// Trims whitespace, drops empty path components and leading/trailing `/`
+    /// (`" /a//b/ "` becomes `"a/b"`). Empty if nothing is left.
+    public static func normalizedFolderPath(_ raw: String) -> String {
+        raw.split(separator: "/", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "/")
+    }
+
     public static var fileURL: URL { AppPaths.container.appendingPathComponent("settings.json") }
 
     /// Missing or corrupt file yields defaults.
