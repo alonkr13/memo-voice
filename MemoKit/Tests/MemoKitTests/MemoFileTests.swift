@@ -25,7 +25,7 @@ import Testing
                 == "2026-10-29 07-42-13.md")
     }
 
-    @Test func testMarkdown() {
+    @Test func testMarkdown() throws {
         let md = MemoFile.markdown(for: memo(transcript: "שלום עולם\n"), timeZone: jerusalem)
         let expected = """
         ---
