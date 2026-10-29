@@ -341,8 +341,10 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
     /// A joiner (e.g. a short background-time pass) that gets cancelled must only stop waiting:
     /// the shared run it joined keeps going and finishes the memo.
     @Test func testCancelledJoinerDoesNotCancelRun() async throws {
+        let gate = Box(false)
         let env = try makeEnv(transcribe: { _, lang in
-            try await Task.sleep(for: .milliseconds(600))   // throws if the run is cancelled
+            // Held until the test opens the gate; Task.sleep throws if the run is cancelled.
+            while !gate.value { try await Task.sleep(for: .milliseconds(10)) }
             return ("ok", lang)
         })
         let memo = try await addMemo(env)
@@ -357,7 +359,8 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         await joiner.value
         // The joiner returned without waiting for the run to finish...
         #expect(await env.memo(memo.id)?.state == .transcribing)
-        // ...and the owner's run still completes the memo.
+        // ...and the owner's run was not cancelled: it still completes the memo.
+        gate.mutate { $0 = true }
         await owner.value
         let m = try #require(await env.memo(memo.id))
         #expect(m.state == .done)
