@@ -103,7 +103,7 @@ final class AppRecordingController: NSObject, RecordingControlling, AVAudioRecor
         isRecording = false
         elapsed = 0
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        Task {
+        Task { @MainActor in
             do {
                 try await AppServices.store.update(id) { memo in
                     memo.durationSec = duration
