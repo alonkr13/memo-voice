@@ -32,6 +32,10 @@ public actor Pipeline {
     private let modelReady: @Sendable (WhisperModel) async -> Bool
     private let settings: @Sendable () -> AppSettings
     private let decode: @Sendable (URL) throws -> [Float]
+    /// The memo being recorded right now, if any. Recovery never touches it.
+    private let activeRecordingID: @Sendable () async -> UUID?
+    /// The memo the running pass is processing at this moment.
+    private var currentMemoID: UUID?
 
     private var current: Task<Void, Never>?
     private var currentIsBackground = false
@@ -48,8 +52,10 @@ public actor Pipeline {
         drive: any MemoUploading,
         modelReady: @escaping @Sendable (WhisperModel) async -> Bool,
         settings: @escaping @Sendable () -> AppSettings,
-        decode: @escaping @Sendable (URL) throws -> [Float] = { try AudioDecoder.pcm16kMono(from: $0) }
+        decode: @escaping @Sendable (URL) throws -> [Float] = { try AudioDecoder.pcm16kMono(from: $0) },
+        activeRecordingID: @escaping @Sendable () async -> UUID? = { nil }
     ) {
+        self.activeRecordingID = activeRecordingID
         self.store = store
         self.audioDir = audioDir
         self.makeTranscriber = transcriber
@@ -113,6 +119,12 @@ public actor Pipeline {
             }
             memo.lastError = nil
         }
+        // A memo orphaned mid-step (e.g. left `transcribing` by a cancelled/killed pass) goes back
+        // to its retryable state, unless a pass is working on it or it is being recorded.
+        let active = await activeRecordingID()
+        if currentMemoID != id && active != id {
+            try? await store.recoverInterrupted(only: id)
+        }
         await processAll()
     }
 
@@ -170,7 +182,8 @@ public actor Pipeline {
         if !recovered {
             // Only memos left by a previous process can be stuck mid-step: this pipeline is the
             // only writer of `transcribing` / `uploading`, and runs are single-flight.
-            do { try await store.recoverInterrupted() } catch { return }
+            let active = await activeRecordingID()
+            do { try await store.recoverInterrupted(excluding: active.map { [$0] } ?? []) } catch { return }
             recovered = true
         }
         var state = RunState()
@@ -199,7 +212,9 @@ public actor Pipeline {
                 handler?(base + 0.9 * min(max(fraction, 0), 1), total)
             }
 
+            currentMemoID = memo.id
             let outcome = await process(memo, background: background, state: &state, report: report)
+            currentMemoID = nil
             if outcome == .cancelled || outcome == .storeFailed { break }
             completed += 1
         }

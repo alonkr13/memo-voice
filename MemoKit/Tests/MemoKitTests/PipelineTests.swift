@@ -77,6 +77,7 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         settings: AppSettings = AppSettings(),
         modelReady: Bool = true,
         transcriber custom: (any Transcribing)? = nil,
+        activeRecordingID: @escaping @Sendable () async -> UUID? = { nil },
         transcribe: (@Sendable ([Float], String) async throws -> (text: String, detectedLanguage: String))? = nil
     ) throws -> Env {
         let dir = FileManager.default.temporaryDirectory
@@ -97,7 +98,8 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
             drive: drive,
             modelReady: { _ in modelReady },
             settings: { settings },
-            decode: { _ in [Float](repeating: 0.1, count: 16_000) })
+            decode: { _ in [Float](repeating: 0.1, count: 16_000) },
+            activeRecordingID: activeRecordingID)
         return Env(dir: dir, store: store, drive: drive, calls: calls,
                    factoryCalls: factoryCalls, pipeline: pipeline)
     }
@@ -110,6 +112,50 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         try Data("audio".utf8).write(to: env.audioURL(memo))
         try await env.store.add(memo)
         return memo
+    }
+
+    @Test func testRetryRecoversOrphanedTranscribingAfterFirstRun() async throws {
+        let env = try makeEnv()
+        await env.pipeline.processAll()   // recovery already ran once for this pipeline
+        let memo = try await addMemo(env, state: .transcribing)
+        await env.pipeline.retry(memo.id)
+        let m = try #require(await env.memo(memo.id))
+        #expect(m.state == .done)
+    }
+
+    @Test func testRetryRecoversOrphanedUploadingAndDedupes() async throws {
+        let env = try makeEnv()
+        await env.pipeline.processAll()
+        let memo = try await addMemo(env, state: .uploading, transcript: "שלום")
+        await env.drive.setExisting(memo.id, "md", "EXISTING")
+        await env.pipeline.retry(memo.id)
+        let m = try #require(await env.memo(memo.id))
+        #expect(m.state == .done)
+        #expect(m.driveFileId == "EXISTING")
+        #expect(await env.drive.uploads.isEmpty)
+    }
+
+    @Test func testRecoverInterruptedExcludingLeavesRecordingAlone() async throws {
+        let env = try makeEnv()
+        let active = try await addMemo(env, state: .recording)
+        let orphan = try await addMemo(env, at: 2_000, state: .recording)
+        try await env.store.recoverInterrupted(excluding: [active.id])
+        #expect(await env.memo(active.id)?.state == .recording)
+        #expect(await env.memo(orphan.id)?.state == .recorded)
+    }
+
+    @Test func testProcessAllDuringActiveRecordingLeavesItRecording() async throws {
+        let probe = try makeEnv()   // only to create a memo id up front
+        let memo = try await addMemo(probe, state: .recording)
+        let id = memo.id
+        let env = try makeEnv(activeRecordingID: { id })
+        try await env.store.add(memo)
+        try Data("audio".utf8).write(to: env.audioURL(memo))
+        await env.pipeline.processAll()
+        #expect(await env.memo(id)?.state == .recording)
+        await env.pipeline.retry(id)
+        #expect(await env.memo(id)?.state == .recording)
+        #expect(await env.drive.uploads.isEmpty)
     }
 
     @Test func testHappyPath() async throws {

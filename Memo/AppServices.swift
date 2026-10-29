@@ -23,5 +23,6 @@ enum AppServices {
         },
         drive: drive,
         modelReady: { model in await MainActor.run { ModelManager.shared.isDownloaded(model) } },
-        settings: { AppSettings.load() })
+        settings: { AppSettings.load() },
+        activeRecordingID: { await MainActor.run { recorder.activeMemoID } })
 }

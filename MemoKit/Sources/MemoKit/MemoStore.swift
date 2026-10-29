@@ -79,10 +79,15 @@ public actor MemoStore {
     }
 
     /// Call on launch: memos left mid-step by a kill/crash return to the previous retryable state.
-    public func recoverInterrupted() throws {
+    /// - Parameters:
+    ///   - excluding: memos to leave alone (e.g. the one being recorded right now).
+    ///   - only: when set, recover just this memo.
+    public func recoverInterrupted(excluding: Set<UUID> = [], only: UUID? = nil) throws {
         let fm = FileManager.default
         var updated = memos
         for index in updated.indices {
+            if excluding.contains(updated[index].id) { continue }
+            if let only, updated[index].id != only { continue }
             switch updated[index].state {
             case .transcribing:
                 updated[index].state = .recorded
