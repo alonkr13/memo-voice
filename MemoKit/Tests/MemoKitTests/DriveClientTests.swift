@@ -238,7 +238,7 @@ private func query(_ req: URLRequest, _ name: String) -> String? {
         #expect(audio == "UP")
         let uploads = StubURLProtocol.requests.filter { $0.0.url!.path.hasPrefix("/upload") }
         #expect(uploads.count == 1)
-        let body = String(decoding: uploads[0].1, as: UTF8.self)
+        let body = String(decoding: try #require(uploads.first).1, as: UTF8.self)
         #expect(body.contains(#""memoPart":"m4a""#))
         #expect(body.contains(#""memoId":"\#(memoId.uuidString)""#))
         let finds = StubURLProtocol.requests.compactMap { query($0.0, "q") }.filter { $0.contains("appProperties") }

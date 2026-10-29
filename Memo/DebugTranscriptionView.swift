@@ -23,9 +23,17 @@ struct DebugTranscriptionView: View {
             }
             audioSection
             resultSection
+            queueSection
         }
         .navigationTitle("Transcription test")
-        .task { await vm.refreshLastAudio() }
+        .task {
+            await vm.refreshLastAudio()
+            // Poll the shared queue so pipeline progress is visible.
+            while !Task.isCancelled {
+                await vm.refreshQueue()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
         .onChange(of: vm.modelId) { vm.dropTranscriber() }
     }
 
@@ -71,6 +79,7 @@ struct DebugTranscriptionView: View {
                 Button("Record 30 s test clip") { Task { await vm.recordTestClip() } }
                     .disabled(vm.running)
             }
+            Toggle("Queue clip as a memo (transcribe + upload)", isOn: $vm.queueClip)
             Button(vm.running ? "Transcribing…" : "Transcribe last memo") {
                 Task { await vm.transcribeLast(model: selectedModel, manager: models) }
             }
@@ -103,6 +112,30 @@ struct DebugTranscriptionView: View {
                            alignment: r.detectedLanguage == "he" ? .trailing : .leading)
                 Button("Copy report") { UIPasteboard.general.string = r.report }
             }
+        }
+    }
+
+    private var queueSection: some View {
+        Section("Queue") {
+            if vm.queue.isEmpty {
+                Text("No memos").foregroundStyle(.secondary)
+            }
+            ForEach(vm.queue) { memo in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(memo.audioFile) · \(memo.state.rawValue)").font(.footnote.monospaced())
+                    if let reason = memo.waitingReason {
+                        Text("Waiting: \(reason)").font(.caption).foregroundStyle(.orange)
+                    }
+                    if let error = memo.lastError {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                    }
+                    if memo.state == .failed || memo.lastError != nil {
+                        Button("Retry") { Task { await AppServices.pipeline.retry(memo.id) } }
+                            .font(.caption)
+                    }
+                }
+            }
+            Button("Process queue now") { BackgroundTasks.processNow() }
         }
     }
 
@@ -148,6 +181,8 @@ final class DebugTranscriptionModel: ObservableObject {
     @Published var running = false
     @Published var status = ""
     @Published var result: DebugRunResult?
+    @Published var queueClip = true
+    @Published var queue: [Memo] = []
 
     private var recorder: AVAudioRecorder?
     /// One loaded model at a time; a second one would not fit in memory.
@@ -166,7 +201,7 @@ final class DebugTranscriptionModel: ObservableObject {
     func refreshLastAudio() async {
         let audioDir = AppPaths.audioDir
         let fm = FileManager.default
-        let memos = await MemoStore(file: AppPaths.queueFile, audioDir: audioDir).all()
+        let memos = await AppServices.store.all()
             .sorted { $0.recordedAt > $1.recordedAt }
         for memo in memos {
             let url = audioDir.appendingPathComponent(memo.audioFile)
@@ -177,6 +212,11 @@ final class DebugTranscriptionModel: ObservableObject {
         lastAudio = files
             .filter { $0.pathExtension == "m4a" }
             .max { Self.modified($0) < Self.modified($1) }
+    }
+
+    func refreshQueue() async {
+        let memos = await AppServices.store.all().sorted { $0.recordedAt > $1.recordedAt }
+        if memos != queue { queue = memos }
     }
 
     private static func modified(_ url: URL) -> Date {
@@ -206,6 +246,7 @@ final class DebugTranscriptionModel: ObservableObject {
                 status = "Recording did not start."
                 return
             }
+            let startedAt = Date()
             recorder = rec
             isRecording = true
             status = "Recording…"
@@ -217,7 +258,19 @@ final class DebugTranscriptionModel: ObservableObject {
             recorder = nil
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             status = "Saved \(url.lastPathComponent)."
+            if queueClip {
+                let memo = Memo(recordedAt: startedAt, durationSec: min(30, Date().timeIntervalSince(startedAt)),
+                                audioFile: url.lastPathComponent, state: .recorded)
+                do {
+                    try await AppServices.store.add(memo)
+                    BackgroundTasks.submitContinued()
+                    status += " Queued as a memo."
+                } catch {
+                    status += " Could not queue: \(error.localizedDescription)"
+                }
+            }
             await refreshLastAudio()
+            await refreshQueue()
         } catch {
             isRecording = false
             recorder = nil

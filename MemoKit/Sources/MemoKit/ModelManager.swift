@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum ModelDownloadError: Error, Equatable, LocalizedError {
@@ -11,15 +12,15 @@ public enum ModelDownloadError: Error, Equatable, LocalizedError {
         case .httpStatus(let s): return "Model download failed (HTTP \(s))."
         case .wrongSize(let e, let a): return "Model download incomplete (\(a) of \(e) bytes)."
         case .fileSystem(let m): return "Could not save the model: \(m)"
-        case .checksumMismatch: return nil
+        case .checksumMismatch: return "Model download is corrupt (checksum mismatch). Please download it again."
         }
     }
 }
 
 /// Downloads Whisper models into `AppPaths.modelsDir` with a background `URLSession`, so a
 /// download keeps going while the app is suspended. A finished download is first moved to
-/// `<file>.part`, its size checked, and only then renamed to `<file>`; `isDownloaded` only
-/// accepts the final file at its exact expected size.
+/// `<file>.part`, its size and SHA-256 checked, and only then renamed to `<file>`;
+/// `isDownloaded` only accepts the final file at its exact expected size.
 @MainActor
 public final class ModelManager: ObservableObject {
     public static let backgroundSessionID = "com.alonk.memo.models"
@@ -145,9 +146,20 @@ public final class ModelManager: ObservableObject {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
     }
 
-    nonisolated static func sha256(of url: URL) throws -> String { "" }
+    /// Lowercase hex SHA-256 of a file, read in 4 MB chunks so a large model never sits in memory.
+    nonisolated static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk: Data? = try autoreleasepool { try handle.read(upToCount: 4 * 1_048_576) }
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 
-    /// Moves a finished download to `<file>.part`, verifies HTTP status and size, then renames
+    /// Moves a finished download to `<file>.part`, verifies HTTP status, size and SHA-256, then renames
     /// it to its final name. Must run synchronously inside `didFinishDownloadingTo`, because
     /// the system deletes `downloaded` as soon as that callback returns.
     nonisolated static func finalize(
@@ -171,6 +183,18 @@ public final class ModelManager: ObservableObject {
         guard size == model.sizeBytes else {
             try? fm.removeItem(at: part)
             throw ModelDownloadError.wrongSize(expected: model.sizeBytes, actual: size)
+        }
+        // A corrupt file of the right size is useless and can't be resumed: drop it.
+        let digest: String
+        do {
+            digest = try sha256(of: part)
+        } catch {
+            try? fm.removeItem(at: part)
+            throw ModelDownloadError.fileSystem(error.localizedDescription)
+        }
+        guard digest == model.sha256 else {
+            try? fm.removeItem(at: part)
+            throw ModelDownloadError.checksumMismatch
         }
         do {
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }

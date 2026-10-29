@@ -1,9 +1,17 @@
 import Foundation
 
-public enum DriveError: Error {
+public enum DriveError: Error, LocalizedError {
     case notSignedIn
     case http(Int, String)
     case network(Error)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notSignedIn: return "Not signed in to Google"
+        case .http(let code, _): return "Google Drive error (HTTP \(code))"
+        case .network(let e): return "Network error: \(e.localizedDescription)"
+        }
+    }
 }
 
 public protocol TokenProvider: Sendable {
@@ -99,22 +107,30 @@ public final class DriveClient: @unchecked Sendable {
 
     // MARK: Files
 
-    /// Finds a previously uploaded file for this memo (by `appProperties.memoId`) in `parent`.
-    public func findFile(memoId: UUID, parent: String) async throws -> String? {
-        let q = "appProperties has { key='memoId' and value='\(memoId.uuidString)' } "
-            + "and '\(Self.escape(parent))' in parents and trashed=false"
+    /// Finds a previously uploaded file for this memo (by `appProperties.memoId`, and
+    /// `appProperties.memoPart` when `part` is given) in `parent`.
+    public func findFile(memoId: UUID, part: String? = nil, parent: String) async throws -> String? {
+        var q = "appProperties has { key='memoId' and value='\(memoId.uuidString)' } "
+        if let part {
+            q += "and appProperties has { key='memoPart' and value='\(Self.escape(part))' } "
+        }
+        q += "and '\(Self.escape(parent))' in parents and trashed=false"
         return try await listFirst(query: q)
     }
 
-    /// Multipart upload; returns the new file's ID.
-    public func upload(name: String, data: Data, mimeType: String, parent: String, memoId: UUID) async throws -> String {
+    /// Multipart upload; returns the new file's ID. `part` (e.g. `md`, `m4a`) is stored as
+    /// `appProperties.memoPart` so a memo's files can be told apart.
+    public func upload(name: String, data: Data, mimeType: String, parent: String, memoId: UUID,
+                       part: String? = nil) async throws -> String {
         struct Metadata: Encodable {
             let name: String
             let parents: [String]
             let appProperties: [String: String]
         }
+        var props = ["memoId": memoId.uuidString]
+        if let part { props["memoPart"] = part }
         let meta = try JSONEncoder().encode(
-            Metadata(name: name, parents: [parent], appProperties: ["memoId": memoId.uuidString]))
+            Metadata(name: name, parents: [parent], appProperties: props))
         let boundary = "memo-\(UUID().uuidString)"
         var body = Data()
         body.append(Data("--\(boundary)\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".utf8))
@@ -130,18 +146,27 @@ public final class DriveClient: @unchecked Sendable {
         return try decodeID(try await send(req))
     }
 
-    /// Resolves the folder, skips the upload if this memo is already in it (dedupe), uploads, and if
-    /// the folder has vanished (404) forgets the cache, re-creates the path and retries once.
+    /// Resolves the folder, skips the upload if this memo's file of the same kind (the name's
+    /// extension, e.g. `.md` vs `.m4a`) is already in it (dedupe), uploads, and if the folder has
+    /// vanished (404) forgets the cache, re-creates the path and retries once.
     public func upload(name: String, data: Data, mimeType: String, folderPath: String, memoId: UUID) async throws -> String {
+        let part = Self.part(of: name)
         let parent = try await validatedFolder(path: folderPath)
-        if let existing = try await findFile(memoId: memoId, parent: parent) { return existing }
+        if let existing = try await findFile(memoId: memoId, part: part, parent: parent) { return existing }
         do {
-            return try await upload(name: name, data: data, mimeType: mimeType, parent: parent, memoId: memoId)
+            return try await upload(name: name, data: data, mimeType: mimeType, parent: parent,
+                                    memoId: memoId, part: part)
         } catch DriveError.http(404, _) {
             forgetFolder(path: folderPath)
             let fresh = try await ensureFolder(path: folderPath)
-            return try await upload(name: name, data: data, mimeType: mimeType, parent: fresh, memoId: memoId)
+            return try await upload(name: name, data: data, mimeType: mimeType, parent: fresh,
+                                    memoId: memoId, part: part)
         }
+    }
+
+    static func part(of name: String) -> String {
+        let ext = (name as NSString).pathExtension.lowercased()
+        return ext.isEmpty ? "file" : ext
     }
 
     /// Like `ensureFolder`, but a cached ID is checked first: Drive accepts uploads into a trashed

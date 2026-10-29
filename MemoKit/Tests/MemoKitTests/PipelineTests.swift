@@ -112,10 +112,11 @@ private struct Boom: Error, LocalizedError { var errorDescription: String? { "bo
         #expect(m.lastError == nil && m.waitingReason == nil)
         let uploads = await env.drive.uploads
         #expect(uploads.count == 1)
-        #expect(uploads[0].name == MemoFile.filename(for: memo))
-        #expect(uploads[0].mimeType == "text/markdown")
-        #expect(uploads[0].text.contains("שלום עולם"))
-        #expect(uploads[0].text.contains("id: \(memo.id.uuidString)"))
+        let md = try #require(uploads.first)
+        #expect(md.name == MemoFile.filename(for: memo))
+        #expect(md.mimeType == "text/markdown")
+        #expect(md.text.contains("שלום עולם"))
+        #expect(md.text.contains("id: \(memo.id.uuidString)"))
         #expect(!FileManager.default.fileExists(atPath: env.audioURL(memo).path))
     }
 

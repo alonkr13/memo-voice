@@ -14,6 +14,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct MemoApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        BackgroundTasks.register()
+        BackgroundTasks.startConnectivityMonitor()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -30,6 +36,13 @@ struct MemoApp: App {
             }
             .task { await ModelManager.shared.reconnect() }
             .onOpenURL { GoogleAuth.handle($0) }
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                switch phase {
+                case .active: BackgroundTasks.processNow()
+                case .background: BackgroundTasks.didEnterBackground()
+                default: break
+                }
+            }
         }
     }
 }

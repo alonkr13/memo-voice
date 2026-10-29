@@ -46,16 +46,23 @@ public final class WhisperTranscriber: Transcribing, @unchecked Sendable {
         if let context { whisper_free(context) }
     }
 
+    /// Cancelling the calling task aborts whisper (via its `abort_callback`) and throws
+    /// `CancellationError`, so an expiring background task stops within moments.
     public func transcribe(samples: [Float], language: String) async throws
         -> (text: String, detectedLanguage: String) {
-        try await withCheckedThrowingContinuation { cont in
-            queue.async {
-                do {
-                    cont.resume(returning: try self.run(samples: samples, language: language))
-                } catch {
-                    cont.resume(throwing: error)
+        let abort = AbortFlag()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                queue.async {
+                    do {
+                        cont.resume(returning: try self.run(samples: samples, language: language, abort: abort))
+                    } catch {
+                        cont.resume(throwing: error)
+                    }
                 }
             }
+        } onCancel: {
+            abort.set()
         }
     }
 
@@ -85,11 +92,13 @@ public final class WhisperTranscriber: Transcribing, @unchecked Sendable {
         return ctx
     }
 
-    private func run(samples: [Float], language: String) throws
+    private func run(samples: [Float], language: String, abort: AbortFlag) throws
         -> (text: String, detectedLanguage: String) {
         let lang = language.isEmpty ? "auto" : language
+        if abort.isSet { throw CancellationError() }
         guard !samples.isEmpty else { return ("", lang) }
         let ctx = try loadedContext()
+        if abort.isSet { throw CancellationError() }
 
         // whisper.cpp returns no text for input shorter than 1 s; pad short clips with silence
         // so a quick word is still transcribed.
@@ -108,25 +117,51 @@ public final class WhisperTranscriber: Transcribing, @unchecked Sendable {
         params.print_realtime = false
         params.print_timestamps = false
         params.detect_language = false   // true would only detect, not transcribe
+        // Polled by whisper between compute steps; returning true stops `whisper_full`.
+        params.abort_callback = { data in
+            guard let data else { return false }
+            return Unmanaged<AbortFlag>.fromOpaque(data).takeUnretainedValue().isSet
+        }
+        params.abort_callback_user_data = Unmanaged.passUnretained(abort).toOpaque()
 
-        let status: Int32 = lang.withCString { cLang in
-            params.language = cLang
-            return input.withUnsafeBufferPointer { buf in
-                whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+        let status: Int32 = withExtendedLifetime(abort) {
+            lang.withCString { cLang in
+                params.language = cLang
+                return input.withUnsafeBufferPointer { buf in
+                    whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+                }
             }
         }
+        if abort.isSet { throw CancellationError() }
         guard status == 0 else { throw TranscriberError.transcriptionFailed(status) }
 
-        var parts: [String] = []
+        // Segment boundaries can fall inside a multi-byte UTF-8 character (common in Hebrew),
+        // so join the raw bytes of all segments and decode once.
+        var bytes: [UInt8] = []
         for i in 0..<whisper_full_n_segments(ctx) {
             guard let cText = whisper_full_get_segment_text(ctx, i) else { continue }
-            let segment = String(cString: cText).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !segment.isEmpty { parts.append(segment) }
+            let length = strlen(cText)
+            cText.withMemoryRebound(to: UInt8.self, capacity: length) {
+                bytes.append(contentsOf: UnsafeBufferPointer(start: $0, count: length))
+            }
         }
+        let text = String(decoding: bytes, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
         var detected = lang
         if let cCode = whisper_lang_str(whisper_full_lang_id(ctx)) {
             detected = String(cString: cCode)
         }
-        return (parts.joined(separator: " "), detected)
+        return (text, detected)
     }
+}
+
+/// Cancellation flag shared between a Swift task and whisper's C abort callback.
+final class AbortFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
 }
