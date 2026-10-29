@@ -81,6 +81,15 @@ jobs:
           grep -A2 LC_RPATH loadcmds.txt
           grep -A2 LC_RPATH loadcmds.txt > rpaths.txt || true
           grep -q "@executable_path/Frameworks" rpaths.txt || { echo "Memo rpath lacks @executable_path/Frameworks"; exit 1; }
+          # The widget links MemoKit too; it must resolve whisper from the app's Frameworks.
+          WX="$APP/PlugIns/MemoWidget.appex/MemoWidget"
+          otool -L "$WX" > wlinked.txt
+          if grep -q "@rpath/whisper.framework/whisper" wlinked.txt; then
+            otool -l "$WX" > wloadcmds.txt
+            grep -A2 LC_RPATH wloadcmds.txt > wrpaths.txt || true
+            cat wrpaths.txt
+            grep -q "@executable_path/../../Frameworks" wrpaths.txt || { echo "MemoWidget links whisper but cannot find Memo.app/Frameworks"; exit 1; }
+          fi
           echo "OK: whisper.framework embedded and linked"
 
       - name: Ad-hoc sign with entitlements
