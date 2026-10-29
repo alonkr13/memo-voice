@@ -43,6 +43,7 @@ import Testing
 
         // Front matter keys, exactly and in order.
         let lines = md.components(separatedBy: "\n")
+        try #require(lines.count > 6)
         let keys = lines[1..<6].map { String($0.split(separator: ":", maxSplits: 1)[0]) }
         #expect(keys == ["id", "recorded_at", "duration_sec", "language", "model"])
     }

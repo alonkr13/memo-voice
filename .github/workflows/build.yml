@@ -69,11 +69,29 @@ jobs:
           test -d "$APP/PlugIns/MemoWidget.appex" || { echo "MemoWidget.appex missing"; exit 1; }
           echo "OK: Memo.app/PlugIns/MemoWidget.appex exists"
 
+      - name: Verify whisper.framework is embedded
+        run: |
+          APP=build/Memo.xcarchive/Products/Applications/Memo.app
+          echo "Frameworks in bundle:"; find "$APP" -name "*.framework" -type d
+          test -f "$APP/Frameworks/whisper.framework/whisper" || { echo "whisper.framework missing in Memo.app/Frameworks"; exit 1; }
+          lipo -info "$APP/Frameworks/whisper.framework/whisper"
+          otool -L "$APP/Memo" > linked.txt; cat linked.txt
+          grep -q "@rpath/whisper.framework/whisper" linked.txt || { echo "Memo does not link whisper.framework"; exit 1; }
+          otool -l "$APP/Memo" > loadcmds.txt
+          grep -A2 LC_RPATH loadcmds.txt
+          grep -A2 LC_RPATH loadcmds.txt > rpaths.txt || true
+          grep -q "@executable_path/Frameworks" rpaths.txt || { echo "Memo rpath lacks @executable_path/Frameworks"; exit 1; }
+          echo "OK: whisper.framework embedded and linked"
+
       - name: Ad-hoc sign with entitlements
         run: |
           APP=build/Memo.xcarchive/Products/Applications/Memo.app
+          # Nested frameworks first (deepest path first), then the extension, then the app.
+          find "$APP" -name "*.framework" -type d | awk '{ print length, $0 }' | sort -rn | cut -d" " -f2- |
+            while read -r FW; do codesign -f -s - "$FW"; done
           codesign -f -s - --entitlements MemoWidget/MemoWidget.entitlements "$APP/PlugIns/MemoWidget.appex"
           codesign -f -s - --entitlements Memo/Memo.entitlements "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Verify entitlements
         run: |
