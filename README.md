@@ -88,7 +88,7 @@ The app stops opening after 7 days. Repeat the install steps with the same IPA (
    - **Drive folder:** type a folder path, for example `Memos` or `Notes/Voice` (use `/` for subfolders). The app creates this folder in your Drive. Do not point it at a folder you made by hand: the app cannot see it, so it would create a new folder with the same name.
    - Tap **Test Drive connection**. It should report success.
    - **Model:** choose **ivrit.ai large-v3-turbo (Hebrew, q5_0)** and tap **Download**. It is shown in the app as 547 MB, so use Wi-Fi. The file is verified after download. The alternative, **OpenAI small (multilingual)**, is shown as 465 MB and weaker at Hebrew.
-   - **Language:** Hebrew, English, or Auto. Hebrew is the default.
+   - **Language:** Hebrew, English, or Auto. Hebrew is the default. With the ivrit.ai model, Auto means Hebrew; choose English for English memos. With OpenAI small, Auto lets Whisper detect the language.
    - **Upload audio** (off by default) also puts the `.m4a` in Drive next to the `.md`. **Keep audio on phone** (off by default) keeps the local recording after upload. Audio is always kept until its transcript has been uploaded.
 
 ## 5. Add the widget
@@ -135,7 +135,9 @@ Notes for anything that reads these files:
 ## Troubleshooting
 
 - **Tapping the widget does nothing.** Use the **Record (opens app)** widget instead. Also check that **Settings > Memo > Live Activities** is on.
-- **The "App Group" row in Settings shows "no".** The app and widget are not sharing data, usually because extension or App Group handling was off in Sideloadly. Reinstall with those Advanced options enabled.
+- **The "App Group" row in Settings shows "no".** The app and widget are not sharing data, usually because extension or App Group handling was off in Sideloadly. Reinstall with those Advanced options enabled. Memos recorded meanwhile are kept in the app's own storage and are moved into the App Group automatically the next time Memo opens with it. If an install that had the App Group is replaced by one without it, the memo list warns that earlier memos may be in the App Group container, which that install can't open; reinstalling with App Groups enabled brings them back.
+- **A recording stopped by itself.** Recordings stop automatically at 30 minutes and are saved and transcribed as usual. Start a new one to keep going.
+- **A memo failed with "Transcription was interrupted 3 times".** The app was closed, ran out of memory or ran out of background time three times while transcribing it. Open Memo, keep it in the foreground, and tap **Retry**.
 - **A memo is stuck.** Open Memo, tap the memo, and tap **Retry**. Check your connection, that you are signed in, and that **Test Drive connection** works.
 - **Google sign-in expires about every week.** The consent screen is still in "Testing" mode. Publish it to production (part 2, step 4), then sign in again.
 - **Sign-in fails immediately.** The installed build was made before the `GOOGLE_CLIENT_ID` secret existed. Re-run the workflow and reinstall.
@@ -145,7 +147,7 @@ Notes for anything that reads these files:
 ## Developer notes
 
 - No Mac is needed. GitHub Actions (`.github/workflows/build.yml`, macOS runner) generates the Xcode project with XcodeGen from `project.yml`, runs the MemoKit tests, archives without signing, ad-hoc signs with the entitlements, and uploads `Memo.ipa` as the `Memo-ipa` artifact. Sideloadly then re-signs it with your Apple ID.
-- The workflow runs on every push, pull request and manual dispatch.
+- The workflow runs on every branch push, on pull requests from forks (a same-repo pull request is already built by its push) and on manual dispatch. A newer push to the same branch cancels the older run.
 - For a local build on a Mac, create the config before generating the project:
 
   ```sh

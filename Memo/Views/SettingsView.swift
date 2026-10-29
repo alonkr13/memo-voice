@@ -20,13 +20,17 @@ struct SettingsView: View {
             accountSection
             folderSection
             modelSection
-            Section("Language") {
+            Section {
                 Picker("Language", selection: $settings.language) {
                     Text("Hebrew").tag("he")
                     Text("English").tag("en")
                     Text("Auto").tag("auto")
                 }
                 .pickerStyle(.segmented)
+            } header: {
+                Text("Language")
+            } footer: {
+                Text("Auto uses Hebrew with the ivrit.ai model.")
             }
             Section {
                 Toggle("Upload audio", isOn: $settings.uploadAudio)
@@ -43,6 +47,12 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .onChange(of: settings) { _, new in new.save() }
+        .onChange(of: settings.modelId) { _, _ in
+            // Switching to a model that is already downloaded: memos waiting for one go now.
+            guard models.isDownloaded(selectedModel) else { return }
+            settings.save()   // before the pipeline reads it
+            BackgroundTasks.processNow()
+        }
         .onChange(of: folderFocused) { _, focused in if !focused { commitFolder() } }
         .onDisappear { commitFolder() }
         .task {
